@@ -1,0 +1,12 @@
+/target
+
+# Runtime state / local secrets
+bot_state.json
+.env
+.env.*
+
+# Cached market data
+/data/
+
+# Audit logs
+*.jsonl
