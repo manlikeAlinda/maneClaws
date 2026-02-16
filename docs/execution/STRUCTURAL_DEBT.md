@@ -34,11 +34,15 @@ Status: COMPLETE (cache reads quarantine unreadable/invalid JSON and treat as mi
 - Impact: Rounding/precision edge cases; can produce off-by-a-tick/step behavior and drift in PnL/equity accounting.
 - Suggested remedy: Introduce fixed-point integers (e.g., satoshis, cents) or a decimal type for accounting; keep `f64` only for indicators if desired.
 
+Status: DEFERRED (large cross-cutting change across state/risk/sizing/execution; deferred to avoid a risky, oversized diff).
+
 ### DEBT-004 (P1) Retry/backoff has no jitter
 - Symptom: Exponential backoff is deterministic; multiple instances (or retries across multiple endpoints) can synchronize.
 - Evidence: [src/http_policy.rs](../../src/http_policy.rs#L1-L160)
 - Impact: Thundering-herd behavior under rate limits or transient outages.
 - Suggested remedy: Add small random jitter (and possibly `Retry-After` handling for 429), while preserving current env controls.
+
+Status: COMPLETE (adds deterministic-testable jitter and honors 429 `Retry-After`).
 
 ### DEBT-005 (P2) Per-request timestamp signing can drift without explicit periodic sync
 - Symptom: `binance_auth` supports offset tracking but is only adjusted by specific error-path logic (account `-1021`). Other signed endpoints use local time directly.
