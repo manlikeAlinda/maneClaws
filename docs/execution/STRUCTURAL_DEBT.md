@@ -66,6 +66,8 @@ Status: COMPLETE (validates scheme: https required by default; allows explicit i
 - Impact: Operational noise; risk of accidentally adding sensitive fields to audit events later.
 - Suggested remedy: Standardize which diagnostics are `debug` vs `info`, and define an allowlist for audit fields.
 
+Status: COMPLETE (moved verbose signing/audit logs behind debug; audit JSON is sanitized to an allowlist of scalar fields).
+
 ### DEBT-008 (P2) Stop-loss order lifecycle is not fully reconciled
 - Symptom: State tracks an optional `stop_order_id`, and execution supports stop-loss-limit placement, but order reconciliation/cancellation behavior is not clearly centralized.
 - Evidence: [src/state.rs](../../src/state.rs#L90-L200), [src/execution.rs](../../src/execution.rs#L1-L220)

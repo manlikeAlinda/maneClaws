@@ -155,10 +155,82 @@ fn audit_log_path() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+fn audit_key_allowed(key: &str) -> bool {
+    matches!(
+        key,
+        "run_id"
+            | "event"
+            | "mode"
+            | "regime"
+            | "position"
+            | "action"
+            | "decision"
+            | "reason"
+            | "price"
+            | "stop"
+            | "qty"
+            | "notional"
+            | "entry_price"
+            | "atr14_5m"
+            | "stop_dist"
+            | "risk_frac_base"
+            | "risk_frac_effective"
+            | "cap_usdt"
+            | "was_capped"
+            | "min_notional"
+            | "equity_usdt"
+            | "peak_equity_usdt"
+            | "daily_loss_start_equity_usdt"
+            | "drawdown_frac"
+            | "daily_loss_frac"
+            | "trades_today"
+            | "max_trades_per_day"
+    )
+}
+
+fn audit_sanitize_scalar(v: &serde_json::Value) -> Option<serde_json::Value> {
+    match v {
+        serde_json::Value::Null => Some(serde_json::Value::Null),
+        serde_json::Value::Bool(b) => Some(serde_json::Value::Bool(*b)),
+        serde_json::Value::Number(n) => Some(serde_json::Value::Number(n.clone())),
+        serde_json::Value::String(s) => {
+            const MAX: usize = 200;
+            if s.len() <= MAX {
+                Some(serde_json::Value::String(s.clone()))
+            } else {
+                Some(serde_json::Value::String(s.chars().take(MAX).collect()))
+            }
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
+}
+
+fn audit_sanitize(value: serde_json::Value) -> Option<serde_json::Value> {
+    let serde_json::Value::Object(map) = value else {
+        return None;
+    };
+
+    let mut out = serde_json::Map::new();
+    for (k, v) in map {
+        if !audit_key_allowed(&k) {
+            continue;
+        }
+        if let Some(sv) = audit_sanitize_scalar(&v) {
+            out.insert(k, sv);
+        }
+    }
+    Some(serde_json::Value::Object(out))
+}
+
 fn audit_emit_json(value: serde_json::Value) {
     if !json_audit_enabled() {
         return;
     }
+
+    let Some(value) = audit_sanitize(value) else {
+        return;
+    };
+
     let line = match serde_json::to_string(&value) {
         Ok(s) => s,
         Err(_) => return,
@@ -975,7 +1047,7 @@ pub async fn run_once_core(
                             }
                         }
 
-                        info!(
+                        debug!(
                             "Audit entry: run_id={} atr14_5m={} stop_dist={} risk_frac_base={:.4}% risk_frac_eff={:.4}% qty={} notional={} cap={} capped={} min_notional={} dd={:.2}% daily_loss={:.2}% trades_today={}/{}",
                             run_id,
                             fmt_usdt(f.atr14_5m),
@@ -1310,7 +1382,7 @@ pub async fn run_once_core(
             };
             if decision == state::PositionDecision::ExitLong {
                 info!("{}", &why);
-                info!(
+                debug!(
                     "Audit exit: run_id={} qty={} entry={} now={} atr14_5m={} reason={}",
                     run_id,
                     fmt_btc(qty),

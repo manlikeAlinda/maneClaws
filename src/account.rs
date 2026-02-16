@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::binance_auth;
 use crate::http_policy::{send_with_retry, HttpPolicy};
@@ -74,15 +74,14 @@ pub async fn fetch_spot_balances(
     let sig = sign(api_secret, &query);
     let url = format!("{base}/api/v3/account?{query}&signature={sig}");
 
-    info!(
-        "Signed request: GET /api/v3/account (base={}) key_present={} key_len={} secret_present={} secret_len={}",
+    debug!(
+        "Signed request: GET /api/v3/account (base={}) key_present={} secret_present={} recv_window={}",
         base,
         !api_key.is_empty(),
-        api_key.len(),
         !api_secret.is_empty(),
-        api_secret.len()
+        recv_window
     );
-    info!(
+    debug!(
         "Signing details: utc={} local_now_ms={} offset_ms={} timestamp_ms={} query_len={} signature_len={}",
         utc,
         local_now_ms,
@@ -91,7 +90,7 @@ pub async fn fetch_spot_balances(
         query.len(),
         sig.len()
     );
-    info!("Query (no signature): {}", query);
+    debug!("Query (no signature): {}", query);
 
     let policy = HttpPolicy::from_env();
     let resp = send_with_retry(client, &policy, || client.get(&url).header("X-MBX-APIKEY", api_key)).await?;
