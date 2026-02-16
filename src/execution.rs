@@ -13,9 +13,18 @@ pub fn is_live_trading_enabled(value: Option<&str>) -> bool {
     matches!(value, Some("1"))
 }
 
+pub fn is_live_confirmed(value: Option<&str>) -> bool {
+    matches!(value.map(|s| s.trim()), Some("YES"))
+}
+
+pub fn is_live_trading_armed_from_env() -> bool {
+    let live = std::env::var("BOT_LIVE_TRADING").ok();
+    let confirm = std::env::var("BOT_LIVE_CONFIRM").ok();
+    is_live_trading_enabled(live.as_deref()) && is_live_confirmed(confirm.as_deref())
+}
+
 pub fn mode_from_env() -> Mode {
-    let v = std::env::var("BOT_LIVE_TRADING").ok();
-    if is_live_trading_enabled(v.as_deref()) {
+    if is_live_trading_armed_from_env() {
         Mode::Live
     } else {
         Mode::Practice
@@ -153,6 +162,15 @@ mod tests {
         assert!(!is_live_trading_enabled(Some("0")));
         assert!(!is_live_trading_enabled(Some("yes")));
         assert!(is_live_trading_enabled(Some("1")));
+    }
+
+    #[test]
+    fn live_confirm_only_when_yes() {
+        assert!(!is_live_confirmed(None));
+        assert!(!is_live_confirmed(Some("")));
+        assert!(!is_live_confirmed(Some("yes")));
+        assert!(is_live_confirmed(Some(" YES ")));
+        assert!(is_live_confirmed(Some("YES")));
     }
 
     #[test]
