@@ -156,10 +156,19 @@ async fn practice_mode_never_calls_live_order_endpoint() {
             .as_nanos()
     ));
 
+    let cache_dir = std::env::temp_dir().join(format!(
+        "binance_survival_bot_cache_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
     let cfg = AppConfig {
         base_url: format!("http://{}", addr),
         symbol: "BTCUSDT".to_string(),
         state_path: tmp.to_string_lossy().to_string(),
+        data_dir: cache_dir.to_string_lossy().to_string(),
         candle_cache_max_age: Duration::from_secs(0),
         api_key: "k".to_string(),
         api_secret: "s".to_string(),
@@ -178,4 +187,5 @@ async fn practice_mode_never_calls_live_order_endpoint() {
     assert!(called_test, "Expected test order call, got: {calls:?}");
 
     let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_dir_all(&cache_dir);
 }

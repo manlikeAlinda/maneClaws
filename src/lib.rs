@@ -10,6 +10,9 @@ pub mod signals;
 pub mod sizing;
 pub mod order;
 pub mod state;
+pub mod log_say;
+pub mod single_instance;
+pub mod paths;
 
 pub mod app;
 pub mod backtest;

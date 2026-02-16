@@ -8,5 +8,10 @@ bot_state.json
 # Cached market data
 /data/
 
+# Runtime logs/locks (do not commit)
+*.log
+*.lock
+
 # Audit logs
 *.jsonl
+

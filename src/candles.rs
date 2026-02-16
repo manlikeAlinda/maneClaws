@@ -33,8 +33,8 @@ impl Interval {
     }
 }
 
-fn cache_path(symbol: &str, interval: Interval) -> PathBuf {
-    Path::new("data").join(format!("{symbol}_{}.json", interval.as_str()))
+fn cache_path(cache_dir: &Path, symbol: &str, interval: Interval) -> PathBuf {
+    cache_dir.join(format!("{symbol}_{}.json", interval.as_str()))
 }
 
 fn cache_is_fresh(path: &Path, max_age: Duration) -> Result<bool> {
@@ -113,8 +113,8 @@ fn parse_klines_body(body: &serde_json::Value) -> Result<Vec<Candle>> {
     Ok(out)
 }
 
-pub fn load_cached(symbol: &str, interval: Interval, max_age: Duration) -> Result<Option<Vec<Candle>>> {
-    let path = cache_path(symbol, interval);
+pub fn load_cached(cache_dir: &Path, symbol: &str, interval: Interval, max_age: Duration) -> Result<Option<Vec<Candle>>> {
+    let path = cache_path(cache_dir, symbol, interval);
     if !cache_is_fresh(&path, max_age)? {
         return Ok(None);
     }
@@ -126,8 +126,8 @@ pub fn load_cached(symbol: &str, interval: Interval, max_age: Duration) -> Resul
     Ok(Some(candles))
 }
 
-pub fn save_cache(symbol: &str, interval: Interval, candles: &[Candle]) -> Result<()> {
-    let path = cache_path(symbol, interval);
+pub fn save_cache(cache_dir: &Path, symbol: &str, interval: Interval, candles: &[Candle]) -> Result<()> {
+    let path = cache_path(cache_dir, symbol, interval);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -220,6 +220,7 @@ pub async fn fetch_klines_cached(
     fetch_klines_cached_from_base(
         client,
         "https://api.binance.com",
+        Path::new("data"),
         symbol,
         interval,
         limit,
@@ -231,17 +232,18 @@ pub async fn fetch_klines_cached(
 pub async fn fetch_klines_cached_from_base(
     client: &Client,
     base_url: &str,
+    cache_dir: &Path,
     symbol: &str,
     interval: Interval,
     limit: usize,
     max_age: Duration,
 ) -> Result<Vec<Candle>> {
-    if let Some(cached) = load_cached(symbol, interval, max_age)? {
+    if let Some(cached) = load_cached(cache_dir, symbol, interval, max_age)? {
         return Ok(cached);
     }
 
     let candles = fetch_klines_from_base(client, base_url, symbol, interval, limit).await?;
-    save_cache(symbol, interval, &candles)?;
+    save_cache(cache_dir, symbol, interval, &candles)?;
     Ok(candles)
 }
 
