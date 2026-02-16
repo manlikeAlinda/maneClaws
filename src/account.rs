@@ -1,12 +1,10 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use std::sync::atomic::{AtomicI64, Ordering};
 use tracing::info;
 
+use crate::binance_auth;
 use crate::http_policy::{send_with_retry, HttpPolicy};
-
-static TIME_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Debug, Deserialize)]
 struct AccountInfo {
@@ -58,58 +56,15 @@ pub async fn fetch_spot_balances(
     api_secret: &str,
     base: &str,
 ) -> Result<SpotBalances> {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    type HmacSha256 = Hmac<Sha256>;
-
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_millis() as u64
-    }
-
-    async fn server_time_ms(client: &Client, base: &str) -> Result<u64> {
-        #[derive(Debug, Deserialize)]
-        struct TimeResp {
-            #[serde(rename = "serverTime")]
-            server_time: u64,
-        }
-
-        let url = format!("{base}/api/v3/time");
-        let policy = HttpPolicy::from_env();
-        let resp = send_with_retry(client, &policy, || client.get(&url)).await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            return Err(anyhow!("Binance time failed: status={status}, body={text}"));
-        }
-        let parsed: TimeResp = serde_json::from_str(&text)?;
-        Ok(parsed.server_time)
-    }
-
-    fn now_ms_with_offset() -> u64 {
-        let local = now_ms() as i64;
-        let off = TIME_OFFSET_MS.load(Ordering::Relaxed);
-        let adjusted = local.saturating_add(off);
-        adjusted.max(0) as u64
-    }
-
     fn sign(secret: &str, payload: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .expect("HMAC can take key of any size");
-        mac.update(payload.as_bytes());
-        let sig = mac.finalize().into_bytes();
-        hex::encode(sig)
+        binance_auth::sign_hmac_sha256_hex(secret, payload)
     }
 
     // Signed request instrumentation (no secrets): endpoint + timestamps + query/sig lengths.
     let utc = time::OffsetDateTime::now_utc();
-    let local_now_ms = now_ms();
-    let offset = TIME_OFFSET_MS.load(Ordering::Relaxed);
-    let ts = now_ms_with_offset();
+    let local_now_ms = binance_auth::now_ms();
+    let offset = binance_auth::time_offset_ms();
+    let ts = binance_auth::now_ms_with_offset();
     let recv_window = 5000_u64;
     let query = format!("recvWindow={recv_window}&timestamp={ts}");
     let sig = sign(api_secret, &query);
@@ -156,10 +111,10 @@ pub async fn fetch_spot_balances(
 
         // Time sync fallback only when Binance tells us our timestamp is wrong.
         if code == Some(-1021) {
-            let server_ms = server_time_ms(client, base).await? as i64;
             let local_ms = local_now_ms as i64;
+            let server_ms = binance_auth::server_time_ms(client, base).await? as i64;
             let new_offset = server_ms.saturating_sub(local_ms);
-            TIME_OFFSET_MS.store(new_offset, Ordering::Relaxed);
+            binance_auth::set_time_offset_ms(new_offset);
             info!(
                 "Clock difference detected: local={} server={} offset_ms={} (positive means local is behind)",
                 local_ms,
@@ -168,7 +123,7 @@ pub async fn fetch_spot_balances(
             );
 
             // Retry once with corrected timestamp.
-            let ts2 = now_ms_with_offset();
+            let ts2 = binance_auth::now_ms_with_offset();
             let query2 = format!("recvWindow={recv_window}&timestamp={ts2}");
             let sig2 = sign(api_secret, &query2);
             let url2 = format!("{base}/api/v3/account?{query2}&signature={sig2}");

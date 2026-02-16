@@ -1,4 +1,5 @@
 pub mod account;
+pub mod binance_auth;
 pub mod binance_orders;
 pub mod candles;
 pub mod exchange_info;
