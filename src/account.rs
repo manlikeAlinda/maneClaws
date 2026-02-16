@@ -61,6 +61,9 @@ pub async fn fetch_spot_balances(
         binance_auth::sign_hmac_sha256_hex(secret, payload)
     }
 
+    // Best-effort periodic sync to reduce timestamp skew errors across all signed endpoints.
+    let _ = binance_auth::ensure_time_synced(client, base).await;
+
     // Signed request instrumentation (no secrets): endpoint + timestamps + query/sig lengths.
     let utc = time::OffsetDateTime::now_utc();
     let local_now_ms = binance_auth::now_ms();

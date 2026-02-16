@@ -50,6 +50,8 @@ Status: COMPLETE (adds deterministic-testable jitter and honors 429 `Retry-After
 - Impact: Time-skew errors may appear on order endpoints even if account sync hasn’t occurred recently.
 - Suggested remedy: Consider a lightweight periodic/boot-time time sync when keys are present (still safe in PRACTICE), or a shared signing helper that always uses `now_ms_with_offset()`.
 
+Status: COMPLETE (signed endpoints use `now_ms_with_offset()` and call periodic best-effort time sync).
+
 ### DEBT-006 (P2) Base URL injection is powerful but under-validated
 - Symptom: `BOT_BASE_URL` is accepted as an arbitrary string.
 - Evidence: [src/main.rs](../../src/main.rs#L1-L260)

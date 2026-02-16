@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use sha2::Sha256;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering as U64Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::http_policy::{send_with_retry, HttpPolicy};
@@ -11,6 +12,7 @@ use crate::http_policy::{send_with_retry, HttpPolicy};
 type HmacSha256 = Hmac<Sha256>;
 
 static TIME_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+static LAST_SYNC_LOCAL_MS: AtomicU64 = AtomicU64::new(0);
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -68,4 +70,26 @@ pub async fn sync_time_offset_ms(client: &Client, base: &str) -> Result<i64> {
     let new_offset = server_ms.saturating_sub(local_ms);
     set_time_offset_ms(new_offset);
     Ok(new_offset)
+}
+
+pub async fn ensure_time_synced(client: &Client, base: &str) -> Result<()> {
+    // Best-effort: if time sync fails, continue with the existing offset.
+    let interval_secs = std::env::var("BOT_TIME_SYNC_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(300);
+    if interval_secs == 0 {
+        return Ok(());
+    }
+
+    let now_local = now_ms();
+    let last = LAST_SYNC_LOCAL_MS.load(U64Ordering::Relaxed);
+    if last != 0 && now_local.saturating_sub(last) < interval_secs.saturating_mul(1000) {
+        return Ok(());
+    }
+
+    // Rate-limit attempts even on failure.
+    LAST_SYNC_LOCAL_MS.store(now_local, U64Ordering::Relaxed);
+    let _ = sync_time_offset_ms(client, base).await;
+    Ok(())
 }

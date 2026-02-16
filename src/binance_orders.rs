@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::binance_auth::{now_ms, sign_hmac_sha256_hex};
+use crate::binance_auth::{ensure_time_synced, now_ms_with_offset, sign_hmac_sha256_hex};
 use crate::http_policy::{send_with_retry, HttpPolicy};
 
 pub async fn test_order(
@@ -12,9 +12,10 @@ pub async fn test_order(
     base: &str,
     query: &str,
 ) -> Result<()> {
+    ensure_time_synced(client, base).await?;
     let policy = HttpPolicy::from_env();
     let resp = send_with_retry(client, &policy, || {
-        let ts = now_ms();
+        let ts = now_ms_with_offset();
         let full_query = format!("{query}&timestamp={ts}");
         let sig = sign_hmac_sha256_hex(api_secret, &full_query);
         let url = format!("{base}/api/v3/order/test?{full_query}&signature={sig}");
@@ -47,9 +48,10 @@ pub async fn place_order(
     base: &str,
     query: &str,
 ) -> Result<OrderAck> {
+    ensure_time_synced(client, base).await?;
     let policy = HttpPolicy::from_env();
     let resp = send_with_retry(client, &policy, || {
-        let ts = now_ms();
+        let ts = now_ms_with_offset();
         let full_query = format!("{query}&timestamp={ts}");
         let sig = sign_hmac_sha256_hex(api_secret, &full_query);
         let url = format!("{base}/api/v3/order?{full_query}&signature={sig}");
@@ -90,9 +92,10 @@ pub async fn get_order(
     symbol: &str,
     order_id: u64,
 ) -> Result<OrderStatus> {
+    ensure_time_synced(client, base).await?;
     let policy = HttpPolicy::from_env();
     let resp = send_with_retry(client, &policy, || {
-        let ts = now_ms();
+        let ts = now_ms_with_offset();
         let query = format!("symbol={symbol}&orderId={order_id}&timestamp={ts}");
         let sig = sign_hmac_sha256_hex(api_secret, &query);
         let url = format!("{base}/api/v3/order?{query}&signature={sig}");
@@ -126,9 +129,10 @@ pub async fn my_trades_for_order(
     symbol: &str,
     order_id: u64,
 ) -> Result<Vec<MyTrade>> {
+    ensure_time_synced(client, base).await?;
     let policy = HttpPolicy::from_env();
     let resp = send_with_retry(client, &policy, || {
-        let ts = now_ms();
+        let ts = now_ms_with_offset();
         // myTrades supports filtering by orderId.
         let query = format!("symbol={symbol}&orderId={order_id}&timestamp={ts}");
         let sig = sign_hmac_sha256_hex(api_secret, &query);
