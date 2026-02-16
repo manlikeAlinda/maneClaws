@@ -8,6 +8,8 @@ pub struct Features {
     pub ema20_5m: f64,
     pub ema50_5m: f64,
     pub atr14_5m: f64,
+    pub bb_mid20_5m: f64,
+    pub rsi14_5m: f64,
     pub donchian_high20_5m: f64,
     pub donchian_low20_5m: f64,
     pub rv_short: f64,
@@ -189,6 +191,58 @@ pub fn zscore_last(values: &[f64], lookback: usize) -> Result<f64> {
     Ok((last - mean) / std)
 }
 
+fn sma_last(values: &[f64], period: usize) -> Result<f64> {
+    if period == 0 {
+        return Err(anyhow!("SMA period must be > 0"));
+    }
+    if values.len() < period {
+        return Err(anyhow!(
+            "Not enough data for SMA{}: have {}, need {}",
+            period,
+            values.len(),
+            period
+        ));
+    }
+    let slice = &values[values.len() - period..];
+    Ok(slice.iter().sum::<f64>() / period as f64)
+}
+
+fn rsi_last(closes: &[f64], period: usize) -> Result<f64> {
+    if period == 0 {
+        return Err(anyhow!("RSI period must be > 0"));
+    }
+    if closes.len() < period + 1 {
+        return Err(anyhow!(
+            "Not enough closes for RSI{}: have {}, need {}",
+            period,
+            closes.len(),
+            period + 1
+        ));
+    }
+
+    let start = closes.len() - (period + 1);
+    let slice = &closes[start..];
+
+    let mut gain = 0.0;
+    let mut loss = 0.0;
+    for i in 1..slice.len() {
+        let d = slice[i] - slice[i - 1];
+        if d >= 0.0 {
+            gain += d;
+        } else {
+            loss += -d;
+        }
+    }
+
+    let avg_gain = gain / period as f64;
+    let avg_loss = loss / period as f64;
+    if avg_loss <= 1e-12 {
+        return Ok(100.0);
+    }
+    let rs = avg_gain / avg_loss;
+    Ok(100.0 - (100.0 / (1.0 + rs)))
+}
+
 pub fn compute_features(candles_5m: &[Candle], candles_1h: &[Candle]) -> Result<Features> {
     let closes_5m = closes(candles_5m);
     let closes_1h = closes(candles_1h);
@@ -202,6 +256,8 @@ pub fn compute_features(candles_5m: &[Candle], candles_1h: &[Candle]) -> Result<
     let ema50_1h = ema_last(&closes_1h, 50)?;
 
     let atr14_5m = atr14_last(candles_5m, 14)?;
+    let bb_mid20_5m = sma_last(&closes_5m, 20)?;
+    let rsi14_5m = rsi_last(&closes_5m, 14)?;
     let (don_high, don_low) = donchian_high_low_prev(candles_5m, 20)?;
 
     let rv_short = realized_vol_stdev_log_returns(&closes_5m, 20)?;
@@ -216,6 +272,8 @@ pub fn compute_features(candles_5m: &[Candle], candles_1h: &[Candle]) -> Result<
         ema20_5m,
         ema50_5m,
         atr14_5m,
+        bb_mid20_5m,
+        rsi14_5m,
         donchian_high20_5m: don_high,
         donchian_low20_5m: don_low,
         rv_short,

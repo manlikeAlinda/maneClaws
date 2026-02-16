@@ -22,6 +22,7 @@ fn load_cached(symbol: &str, interval: Interval) -> Result<Vec<Candle>> {
 /// - Reads cached 5m + 1h candles
 /// - Runs the same features/regime/signal logic
 /// - Uses the same position manager for exits
+///
 /// No curve fitting; just plumbing.
 pub fn simulate_from_cache(symbol: &str) -> Result<BacktestResult> {
     let candles_5m = load_cached(symbol, Interval::FiveMinutes)?;
@@ -58,12 +59,13 @@ pub fn simulate_from_cache(symbol: &str) -> Result<BacktestResult> {
         match st.position {
             state::Position::Flat => {
                 let sig = signals::trend_breakout_long_only(r.regime, &f, price, r.vol_ratio);
-                if sig.action == signals::Action::EnterLong {
-                    if let Some(stop) = sig.stop_price {
-                        st.enter_long(price, 0.001, stop, now_ms);
-                        trades += 1;
-                    }
+                if sig.action == signals::Action::EnterLong && let Some(stop) = sig.stop_price {
+                    st.enter_long(price, 0.001, stop, now_ms);
+                    trades += 1;
                 }
+            }
+            state::Position::ExternalInventory { .. } => {
+                // Backtest does not simulate manual wallet changes; ignore.
             }
             state::Position::Long { .. } => {
                 let (d, _) = st.manage_open_position(price, f.atr14_5m, now_ms);

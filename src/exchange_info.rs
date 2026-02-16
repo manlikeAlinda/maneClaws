@@ -22,6 +22,7 @@ pub struct SymbolInfo {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "filterType")]
+#[allow(non_camel_case_types)]
 pub enum Filter {
     LOT_SIZE {
         #[serde(rename = "minQty")]

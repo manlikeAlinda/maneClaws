@@ -35,7 +35,8 @@ pub async fn test_order(
 #[derive(Debug, Deserialize)]
 pub struct OrderAck {
     pub symbol: String,
-    pub orderId: u64,
+    #[serde(rename = "orderId")]
+    pub order_id: u64,
     pub status: String,
 }
 
@@ -69,7 +70,8 @@ pub async fn place_order(
 #[derive(Debug, Deserialize, Clone)]
 pub struct OrderStatus {
     pub symbol: String,
-    pub orderId: u64,
+    #[serde(rename = "orderId")]
+    pub order_id: u64,
     pub status: String,
     #[serde(rename = "executedQty")]
     pub executed_qty: String,

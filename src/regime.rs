@@ -83,6 +83,8 @@ mod tests {
             ema20_5m: 100.0,
             ema50_5m: 100.0,
             atr14_5m: 10.0,
+            bb_mid20_5m: 0.0,
+            rsi14_5m: 50.0,
             donchian_high20_5m: 0.0,
             donchian_low20_5m: 0.0,
             rv_short: 0.01,

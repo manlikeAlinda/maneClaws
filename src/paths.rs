@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 

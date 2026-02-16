@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use anyhow::{anyhow, Result};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use std::time::Duration;
@@ -67,7 +69,9 @@ fn is_retryable_error(e: &reqwest::Error) -> bool {
 fn backoff_for_attempt(policy: &HttpPolicy, attempt: usize) -> Duration {
     // Exponential backoff, clamped.
     let base_ms = policy.initial_backoff.as_millis() as u64;
-    let ms = base_ms.saturating_mul(1u64.saturating_shl(attempt.min(30) as u32));
+    let shift = attempt.min(30) as u32;
+    let factor = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let ms = base_ms.saturating_mul(factor);
     Duration::from_millis(ms.min(policy.max_backoff.as_millis() as u64))
 }
 

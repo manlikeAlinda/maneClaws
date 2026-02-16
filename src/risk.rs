@@ -32,6 +32,7 @@ pub fn risk_fraction_for_regime(regime: Regime) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn size_entry_long(
     regime: Regime,
     equity_usdt: f64,
@@ -42,6 +43,7 @@ pub fn size_entry_long(
     stop_price: f64,
     step_size: f64,
     min_notional: f64,
+    risk_fraction_multiplier: f64,
 ) -> RiskDecision {
     if equity_usdt <= 0.0 {
         return RiskDecision::Block {
@@ -69,6 +71,9 @@ pub fn size_entry_long(
     }
 
     let mut r = risk_fraction_for_regime(regime);
+    if risk_fraction_multiplier.is_finite() && risk_fraction_multiplier > 0.0 {
+        r *= risk_fraction_multiplier;
+    }
     if r <= 0.0 {
         return RiskDecision::Block {
             reason: "This market is too dry. We wait.".to_string(),
@@ -146,6 +151,7 @@ mod tests {
             90.0,
             0.001,
             5.0,
+            1.0,
         );
         matches!(d, RiskDecision::Block { .. });
     }
@@ -162,6 +168,7 @@ mod tests {
             90.0,
             0.001,
             5.0,
+            1.0,
         );
         // daily loss is 21 >= 20
         assert!(matches!(d, RiskDecision::Block { hibernate: true, .. }));
@@ -179,6 +186,7 @@ mod tests {
             90.0,
             0.001,
             5.0,
+            1.0,
         );
         match d {
             RiskDecision::Allow { qty, .. } => {
@@ -201,6 +209,7 @@ mod tests {
             90.0,
             0.001,
             5.0,
+            1.0,
         );
         assert!(matches!(d, RiskDecision::Block { hibernate: true, .. }));
     }

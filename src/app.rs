@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use crate::candles::{self, Interval};
 use crate::execution::{self, Mode};
 use crate::http_policy::{send_with_retry, HttpPolicy};
@@ -52,9 +54,8 @@ impl RunGuard {
         Self {
             decision: "WAIT".to_string(),
             reason: "".to_string(),
-            end: if mode == Mode::Practice {
-                "no money moved".to_string()
-            } else {
+            end: {
+                let _ = mode;
                 "no money moved".to_string()
             },
             mode,
@@ -64,10 +65,6 @@ impl RunGuard {
 
     fn enable_decision(&mut self) {
         self.emit_decision = true;
-    }
-
-    fn suppress_decision(&mut self) {
-        self.emit_decision = false;
     }
 
     fn set_decision(&mut self, decision: &str) {
@@ -192,6 +189,7 @@ fn daily_loss_fraction(daily_start_equity: f64, equity: f64) -> f64 {
     ((daily_start_equity - equity) / daily_start_equity).max(0.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_decision_summary(
     run_id: &str,
     mode: Mode,
@@ -833,7 +831,9 @@ pub async fn run_once(client: &Client, cfg: &AppConfig) -> Result<RunOutcome> {
     let max_notional_fraction = env_f64("BOT_MAX_TRADE_NOTIONAL_FRACTION").unwrap_or(0.20);
     let max_notional_usdt_abs = env_f64("BOT_MAX_TRADE_NOTIONAL_USDT");
 
+    #[allow(unused_assignments)]
     let mut decision_action = "WAIT".to_string();
+    #[allow(unused_assignments)]
     let mut decision_reason = String::new();
 
     if st.is_dead {
@@ -865,7 +865,7 @@ pub async fn run_once(client: &Client, cfg: &AppConfig) -> Result<RunOutcome> {
         info!("We are resting now. We wait." );
         guard.set_decision("WAIT");
         guard.set_reason("We wait. Not time yet.");
-        guard.set_end(if mode == Mode::Practice { "no money moved" } else { "no money moved" });
+        guard.set_end("no money moved");
         log_decision_summary(
             &run_id,
             mode,
@@ -885,7 +885,7 @@ pub async fn run_once(client: &Client, cfg: &AppConfig) -> Result<RunOutcome> {
         info!("We just finished a trip. We cool down first." );
         guard.set_decision("WAIT");
         guard.set_reason("We wait. Not time yet.");
-        guard.set_end(if mode == Mode::Practice { "no money moved" } else { "no money moved" });
+        guard.set_end("no money moved");
         log_decision_summary(
             &run_id,
             mode,
@@ -1129,13 +1129,12 @@ pub async fn run_once(client: &Client, cfg: &AppConfig) -> Result<RunOutcome> {
                                     oid,
                                 )
                                 .await
-                                .map_err(|e| {
-                                    if is_binance_code(&e, -2015) {
+                                .inspect_err(|e| {
+                                    if is_binance_code(e, -2015) {
                                         info!("Reason: Binance rejected a signed order request (code -2015).");
                                         log_actions_for_2015();
                                         log_ip_whitelist_hint(&public_ip);
                                     }
-                                    e
                                 })?;
                                 if let Some(avg) = avg_price_from_order_status(&st_order)? {
                                     entry_price = avg;

@@ -38,6 +38,7 @@ pub fn mode_log_line(mode: Mode) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_buy_market(
     client: &Client,
     mode: Mode,
@@ -67,11 +68,12 @@ pub async fn execute_buy_market(
         }
         Mode::Live => {
             let ack = binance_orders::place_order(client, api_key, api_secret, base, &qs).await?;
-            Ok(Some(ack.orderId))
+            Ok(Some(ack.order_id))
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_sell_market(
     client: &Client,
     mode: Mode,
@@ -101,11 +103,12 @@ pub async fn execute_sell_market(
         }
         Mode::Live => {
             let ack = binance_orders::place_order(client, api_key, api_secret, base, &qs).await?;
-            Ok(Some(ack.orderId))
+            Ok(Some(ack.order_id))
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn place_stop_loss_limit_sell(
     client: &Client,
     mode: Mode,
@@ -147,7 +150,7 @@ pub async fn place_stop_loss_limit_sell(
         }
         Mode::Live => {
             let ack = binance_orders::place_order(client, api_key, api_secret, base, &qs).await?;
-            Ok(Some(ack.orderId))
+            Ok(Some(ack.order_id))
         }
     }
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -116,10 +118,15 @@ fn atomic_write_with_prev(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Position {
+    #[default]
     Flat,
+    ExternalInventory {
+        btc_qty: f64,
+        detected_time_ms: u64,
+    },
     Long {
         entry_price: f64,
         qty: f64,
@@ -131,12 +138,6 @@ pub enum Position {
         #[serde(default)]
         stop_order_id: Option<u64>,
     },
-}
-
-impl Default for Position {
-    fn default() -> Self {
-        Position::Flat
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +152,16 @@ pub struct BotState {
     // Legacy fields (kept for backward compatibility with existing JSON)
     pub starting_usdt: f64,
     pub realized_pnl_usdt: f64,
+
+    // Equity anchor: used for "-20% dead" and "+20% unlock" logic.
+    #[serde(default)]
+    pub start_equity_usdt: f64,
+    #[serde(default)]
+    pub profit_unlocked: bool,
+    #[serde(default)]
+    pub anchor_bumps: u32,
+    #[serde(default)]
+    pub risk_reduction_until_ms: u64,
 
     // Current live fields
     pub equity_usdt: f64,
@@ -171,6 +182,10 @@ impl Default for BotState {
         Self {
             starting_usdt: 0.0,
             realized_pnl_usdt: 0.0,
+            start_equity_usdt: 0.0,
+            profit_unlocked: false,
+            anchor_bumps: 0,
+            risk_reduction_until_ms: 0,
             equity_usdt: 0.0,
             fees_usdt: 0.0,
             is_dead: false,
@@ -191,6 +206,10 @@ impl BotState {
         Self {
             starting_usdt,
             realized_pnl_usdt: 0.0,
+            start_equity_usdt: starting_usdt,
+            profit_unlocked: false,
+            anchor_bumps: 0,
+            risk_reduction_until_ms: 0,
             equity_usdt: starting_usdt,
             fees_usdt: 0.0,
             is_dead: false,
@@ -206,6 +225,9 @@ impl BotState {
 
     pub fn sync_equity_and_day(&mut self, equity_usdt: f64) {
         self.equity_usdt = equity_usdt;
+        if self.start_equity_usdt <= 0.0 {
+            self.start_equity_usdt = equity_usdt;
+        }
         if self.peak_equity_usdt <= 0.0 {
             self.peak_equity_usdt = equity_usdt;
         }
@@ -260,6 +282,30 @@ impl BotState {
         };
     }
 
+    pub fn eval_death_and_unlock(&mut self, equity_usdt: f64, _now_ms: u64) -> (bool, bool) {
+        if self.is_dead {
+            return (false, false);
+        }
+
+        if self.start_equity_usdt <= 0.0 {
+            self.start_equity_usdt = equity_usdt;
+            return (false, false);
+        }
+
+        let died_now = equity_usdt <= self.start_equity_usdt * 0.80;
+        if died_now {
+            self.is_dead = true;
+            return (true, false);
+        }
+
+        let unlocked_now = equity_usdt >= self.start_equity_usdt * 1.20;
+        if unlocked_now {
+            self.profit_unlocked = true;
+        }
+
+        (false, unlocked_now)
+    }
+
     pub fn set_stop_order_id(&mut self, order_id: u64) {
         if let Position::Long { stop_order_id, .. } = &mut self.position {
             *stop_order_id = Some(order_id);
@@ -275,6 +321,10 @@ impl BotState {
         let atr = atr14_5m.max(1e-12);
         match &mut self.position {
             Position::Flat => (PositionDecision::Hold, "No position.".to_string()),
+            Position::ExternalInventory { .. } => (
+                PositionDecision::Hold,
+                "External inventory present. Bot will not manage it automatically.".to_string(),
+            ),
             Position::Long {
                 entry_price,
                 initial_stop_price,
@@ -349,6 +399,9 @@ pub fn load_or_init(path: &str, starting_usdt: f64) -> Result<BotState> {
         };
         if st.starting_usdt <= 0.0 {
             st.starting_usdt = starting_usdt;
+        }
+        if st.start_equity_usdt <= 0.0 {
+            st.start_equity_usdt = st.equity_usdt.max(starting_usdt);
         }
         if st.peak_equity_usdt <= 0.0 {
             st.peak_equity_usdt = st.equity_usdt.max(starting_usdt);

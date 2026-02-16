@@ -137,7 +137,6 @@ pub fn save_cache(cache_dir: &Path, symbol: &str, interval: Interval, candles: &
     Ok(())
 }
 
-pub async fn fetch_klines(
 pub async fn fetch_klines_from_base(
     client: &Client,
     base_url: &str,

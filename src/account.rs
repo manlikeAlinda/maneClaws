@@ -15,10 +15,11 @@ struct AccountInfo {
 struct Balance {
     asset: String,
     free: String,
+    #[allow(dead_code)]
     locked: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SpotBalances {
     pub usdt_free: f64,
     pub btc_free: f64,

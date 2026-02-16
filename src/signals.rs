@@ -74,6 +74,10 @@ pub fn trend_breakout_long_only(
     }
 }
 
+pub fn entry_long_signal(regime: Regime, f: &Features, current_price: f64, vol_ratio: f64) -> Signal {
+    trend_breakout_long_only(regime, f, current_price, vol_ratio)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +89,8 @@ mod tests {
             ema20_5m: 0.0,
             ema50_5m: 0.0,
             atr14_5m: 100.0,
+            bb_mid20_5m: 0.0,
+            rsi14_5m: 50.0,
             donchian_high20_5m: 200.0,
             donchian_low20_5m: 0.0,
             rv_short: 0.0,
