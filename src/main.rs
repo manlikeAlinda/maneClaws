@@ -29,6 +29,36 @@ fn load_trimmed_env(name: &str, allow_missing: bool) -> Result<(String, usize, u
     }
 }
 
+fn is_loopback_http_base_url(base_url: &str) -> bool {
+    base_url.starts_with("http://127.0.0.1")
+        || base_url.starts_with("http://localhost")
+        || base_url.starts_with("http://[::1]")
+}
+
+fn validate_base_url(base_url: &str) -> Result<()> {
+    let allow_insecure = matches!(
+        std::env::var("BOT_ALLOW_INSECURE_BASE_URL").ok().as_deref(),
+        Some("1")
+    );
+
+    if base_url.starts_with("https://") {
+        return Ok(());
+    }
+
+    if base_url.starts_with("http://") {
+        if allow_insecure || is_loopback_http_base_url(base_url) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "BOT_BASE_URL must be https:// (set BOT_ALLOW_INSECURE_BASE_URL=1 to override)"
+        ));
+    }
+
+    Err(anyhow!(
+        "BOT_BASE_URL must start with https:// (recommended) or http:// (insecure)"
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Simple log level switch:
@@ -152,6 +182,12 @@ async fn main() -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "https://api.binance.com".to_string());
+
+    validate_base_url(&base_url)?;
+    info!("Base URL: {}", base_url);
+    if base_url.starts_with("http://") {
+        info!("WARNING: Using insecure http:// base URL.");
+    }
 
     let cfg = binance_survival_bot::app::AppConfig {
         base_url,

@@ -58,6 +58,8 @@ Status: COMPLETE (signed endpoints use `now_ms_with_offset()` and call periodic 
 - Impact: Misconfiguration can silently redirect traffic to a wrong host; SSRF-like risks if someone controls env.
 - Suggested remedy: Validate scheme/host (e.g., require `https://` in normal operation) and optionally log a warning when non-https is used.
 
+Status: COMPLETE (validates scheme: https required by default; allows explicit insecure override; allows loopback http for tests; logs selected base URL).
+
 ### DEBT-007 (P3) Logging verbosity and sensitive-context hygiene needs a policy
 - Symptom: Some paths log detailed request context (lengths, timestamps) at `info!`, and JSON audit can append arbitrary event payloads to a file.
 - Evidence: [src/account.rs](../../src/account.rs#L1-L160), [src/app.rs](../../src/app.rs#L220-L320)
