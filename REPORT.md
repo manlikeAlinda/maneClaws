@@ -1,3 +1,64 @@
+# Binance Survival Bot — Structural Report (Evidence-Based)
+
+Date: 2026-02-16
+
+This report is intentionally evidence-linked. Every structural claim points to a code location.
+
+## 1. Scope and build footprint
+- The project is a Rust 2024 crate with Tokio async runtime and Reqwest HTTP client; dependencies and edition are declared in [Cargo.toml](Cargo.toml#L1-L18).
+- The executable entrypoint configures tracing and runs either one-shot or loop mode; see [src/main.rs](src/main.rs#L1-L260).
+
+## 2. Entrypoints and runtime modes (Practice vs Live)
+- The bot decides PRACTICE vs LIVE via `BOT_LIVE_TRADING=1` AND `BOT_LIVE_CONFIRM=YES`; logic lives in [src/execution.rs](src/execution.rs#L1-L60).
+- The entrypoint constructs config, decides loop mode via args/env, and executes `run_once` repeatedly in loop mode; see [src/main.rs](src/main.rs#L1-L260).
+
+## 3. Deterministic filesystem layout (base/state/cache/lock)
+- Paths are centralized and derived from `BOT_BASE_DIR` (absolute required) with targeted overrides (`BOT_STATE_PATH`, `BOT_DATA_DIR`, `BOT_LOCK_PATH`); see [src/paths.rs](src/paths.rs#L1-L89).
+- The Windows scheduler wrapper forces deterministic working directory and sets `BOT_BASE_DIR` and `BOT_LOCK_PATH`; see [run_bot_30min.ps1](run_bot_30min.ps1#L1-L80).
+
+## 4. Single-instance safety
+- The bot acquires an exclusive lock file (`fs2`), and fails with a “lock busy” error if another instance holds it; see [src/single_instance.rs](src/single_instance.rs#L1-L55).
+- The entrypoint treats “lock busy” as a clean exit to avoid double-trading; see [src/main.rs](src/main.rs#L1-L260).
+
+## 5. Configuration and safety latches
+- LIVE is a two-factor latch (enable + explicit confirmation) and defaults to PRACTICE if either is missing; see [src/execution.rs](src/execution.rs#L1-L60) and the scheduler default in [run_bot_30min.ps1](run_bot_30min.ps1#L12-L35).
+- The bot supports base URL injection via `BOT_BASE_URL` (defaulting to `https://api.binance.com`); see [src/main.rs](src/main.rs#L1-L260).
+- API keys may come from process env or dotenv; the entrypoint logs presence/length and trims whitespace before use; see [src/main.rs](src/main.rs#L1-L260).
+
+## 6. HTTP behavior (timeouts, retries, backoff)
+- HTTP calls share a centralized policy (timeout, retry count, exponential backoff) with env override knobs; see [src/http_policy.rs](src/http_policy.rs#L1-L140).
+- Public endpoints (ping/price/klines/exchangeInfo) are called via the retry helper; examples include [src/app.rs](src/app.rs), [src/pipeline/mod.rs](src/pipeline/mod.rs), [src/candles.rs](src/candles.rs#L90-L170), and [src/exchange_info.rs](src/exchange_info.rs#L1-L70).
+
+## 7. State model and persistence guarantees
+- Bot state is a serde JSON struct with defaults for backward compatibility; position includes `Flat`, `Long`, and `ExternalInventory`; see [src/state.rs](src/state.rs#L90-L170).
+- Persistence uses atomic write with a `.prev` snapshot and quarantines corrupt/unreadable state into a `quarantine/` folder; load/restore logic is in [src/state.rs](src/state.rs#L1-L120) and [src/state.rs](src/state.rs#L260-L380).
+
+## 8. Trading pipeline structure (data → features → signals → risk → sizing)
+- Candle acquisition supports cached JSON files with freshness checks; see [src/candles.rs](src/candles.rs#L1-L120).
+- Features are computed from candles (EMA/ATR/Donchian/vol/z-score, plus SMA/RSI) in [src/features.rs](src/features.rs#L1-L260).
+- Entry signal is “trend breakout long-only” and produces an action + stop price; see [src/signals.rs](src/signals.rs#L1-L90).
+- Risk sizing applies daily-loss and drawdown gates, then rounds to exchange step size; see [src/risk.rs](src/risk.rs#L1-L160) and [src/sizing.rs](src/sizing.rs#L1-L120).
+
+## 9. Private endpoints, order placement, and PRACTICE safety
+- PRACTICE uses Binance `/api/v3/order/test` while LIVE uses `/api/v3/order`; the mode switch is enforced in [src/execution.rs](src/execution.rs#L40-L200) and calls into [src/binance_orders.rs](src/binance_orders.rs#L1-L120).
+- There is an integration-style test that runs a stubbed HTTP server and asserts PRACTICE never hits the live order endpoint; see [tests/practice_safety.rs](tests/practice_safety.rs#L1-L220).
+- When keys are missing or wallet access is rejected, the app stays in watch-only (no private endpoints used beyond the attempted balance fetch) and sets a WAIT decision; see [src/pipeline/mod.rs](src/pipeline/mod.rs).
+
+## 10. Operational outputs and observability
+- Log output is intentionally “two-tier”: IMPORTANT mode emits only friendly lines plus warnings/errors, while DEBUG mode enables crate debug; see [src/main.rs](src/main.rs#L1-L260).
+- Friendly “grandmother” lines are centralized in `log_say`; see [src/log_say.rs](src/log_say.rs#L1-L80).
+- Optional JSON audit logging is env-gated and can append to a file; see [src/pipeline/mod.rs](src/pipeline/mod.rs).
+
+---
+
+## Appendix A: Execution verification status
+- SD task board shows SD-001..SD-008 complete: [docs/execution/TASK_BOARD.md](docs/execution/TASK_BOARD.md#L1-L40)
+- Final checks record `cargo test` and `cargo clippy -- -D warnings` as PASS: [docs/execution/FINAL_CHECKS.md](docs/execution/FINAL_CHECKS.md#L1-L40)
+
+---
+
+## Appendix B: PRACTICE Wallet Access Failure Report (historical)
+
 # Binance Survival Bot — PRACTICE Wallet Access Failure Report
 
 Date: 2026-02-11
