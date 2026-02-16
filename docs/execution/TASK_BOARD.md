@@ -2,7 +2,6 @@
 
 ## TODO
 
-- SD-008 Make ipify optional and non-fatal
 
 ## IN_PROGRESS
 
@@ -16,5 +15,6 @@
 - SD-006 Centralize HTTP retry/backoff policy
 - SD-004 Consolidate signing + time utilities
 - SD-007 Enforce base_url injection everywhere
+- SD-008 Make ipify optional and non-fatal
 
 ## BLOCKED

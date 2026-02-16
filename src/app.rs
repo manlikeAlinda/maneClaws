@@ -300,6 +300,14 @@ async fn ping(client: &Client, base_url: &str) -> Result<()> {
 }
 
 async fn detect_public_ip(client: &Client) -> Option<String> {
+    let enabled = matches!(
+        std::env::var("BOT_PUBLIC_IP_LOOKUP").ok().as_deref(),
+        Some("1")
+    );
+    if !enabled {
+        return None;
+    }
+
     let url = "https://api.ipify.org?format=json";
 
     let resp = client
@@ -335,7 +343,14 @@ fn log_actions_for_2015() {
 
 fn log_ip_whitelist_hint(_public_ip: &Option<String>) {
     // The exact IP is logged by detect_public_ip(); keep this line stable for copy/paste guidance.
-    info!("If your Binance API key uses IP restriction, whitelist this IP.");
+    if matches!(
+        std::env::var("BOT_PUBLIC_IP_LOOKUP").ok().as_deref(),
+        Some("1")
+    ) {
+        info!("If your Binance API key uses IP restriction, whitelist this IP.");
+    } else {
+        info!("Public IP lookup is disabled (set BOT_PUBLIC_IP_LOOKUP=1). If your Binance API key uses IP restriction, whitelist this machine's public IP.");
+    }
 }
 
 fn qty_precision_from_step(step_size: f64) -> usize {
