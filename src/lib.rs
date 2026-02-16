@@ -4,6 +4,7 @@ pub mod candles;
 pub mod exchange_info;
 pub mod execution;
 pub mod features;
+pub mod http_policy;
 pub mod regime;
 pub mod risk;
 pub mod signals;

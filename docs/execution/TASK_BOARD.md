@@ -2,7 +2,6 @@
 
 ## TODO
 
-- SD-006 Centralize HTTP retry/backoff config
 - SD-004 Consolidate signing + time utilities
 - SD-007 Enforce base_url injection everywhere
 - SD-008 Make ipify optional and non-fatal
@@ -16,5 +15,6 @@
 - SD-002 Scheduler determinism + live latch
 - SD-003 Unify locking story
 - SD-005 Atomic state persistence + corrupt quarantine
+- SD-006 Centralize HTTP retry/backoff policy
 
 ## BLOCKED

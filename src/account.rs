@@ -4,6 +4,8 @@ use serde::Deserialize;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tracing::info;
 
+use crate::http_policy::{send_with_retry, HttpPolicy};
+
 static TIME_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Debug, Deserialize)]
@@ -77,7 +79,8 @@ pub async fn fetch_spot_balances(
         }
 
         let url = format!("{base}/api/v3/time");
-        let resp = client.get(url).send().await?;
+        let policy = HttpPolicy::from_env();
+        let resp = send_with_retry(client, &policy, || client.get(&url)).await?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
@@ -131,11 +134,8 @@ pub async fn fetch_spot_balances(
     );
     info!("Query (no signature): {}", query);
 
-    let resp = client
-        .get(url)
-        .header("X-MBX-APIKEY", api_key)
-        .send()
-        .await?;
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || client.get(&url).header("X-MBX-APIKEY", api_key)).await?;
 
     let status = resp.status();
     let text = resp.text().await?;
@@ -179,11 +179,10 @@ pub async fn fetch_spot_balances(
                 sig2.len()
             );
 
-            let resp2 = client
-                .get(url2)
-                .header("X-MBX-APIKEY", api_key)
-                .send()
-                .await?;
+            let resp2 = send_with_retry(client, &policy, || {
+                client.get(&url2).header("X-MBX-APIKEY", api_key)
+            })
+            .await?;
             let status2 = resp2.status();
             let text2 = resp2.text().await?;
             let body_trunc2: String = text2.chars().take(500).collect();

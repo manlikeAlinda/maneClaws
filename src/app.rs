@@ -1,5 +1,6 @@
 use crate::candles::{self, Interval};
 use crate::execution::{self, Mode};
+use crate::http_policy::{send_with_retry, HttpPolicy};
 use crate::regime::Regime;
 use crate::{account, binance_orders, exchange_info, features, log_say, regime, risk, signals, sizing, state};
 use anyhow::{anyhow, Context, Result};
@@ -271,102 +272,31 @@ pub async fn fetch_price(client: &Client, base_url: &str, symbol: &str) -> Resul
 
     let url = format!("{base_url}/api/v3/ticker/price?symbol={symbol}");
 
-    let retries = std::env::var("BOT_HTTP_RETRIES")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(3);
-    let base_backoff_ms = std::env::var("BOT_HTTP_BACKOFF_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(250);
-    let max_backoff_ms = std::env::var("BOT_HTTP_BACKOFF_MAX_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(2_000);
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || client.get(&url)).await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
 
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..=retries {
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = Some(anyhow!("Price request failed: {e}"));
-                if attempt < retries {
-                    let backoff = (base_backoff_ms.saturating_mul(1u64 << attempt)).min(max_backoff_ms);
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                    continue;
-                }
-                break;
-            }
-        };
-
-        let status = resp.status();
-        if status.as_u16() == 429 || status.is_server_error() {
-            let text = resp.text().await.unwrap_or_default();
-            last_err = Some(anyhow!("Price returned {status}: {text}"));
-            if attempt < retries {
-                let backoff = (base_backoff_ms.saturating_mul(1u64 << attempt)).min(max_backoff_ms);
-                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                continue;
-            }
-            break;
-        }
-
-        let resp = resp.error_for_status()?;
-        let body = resp.json::<PriceResp>().await?;
-        return Ok(body.price.parse::<f64>()?);
+    if !status.is_success() {
+        return Err(anyhow!("Price returned {status}: {text}"));
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow!("Price request failed")))
+    let body = serde_json::from_str::<PriceResp>(&text)?;
+    Ok(body.price.parse::<f64>()?)
 }
 
 async fn ping(client: &Client, base_url: &str) -> Result<()> {
     let url = format!("{base_url}/api/v3/ping");
 
-    let retries = std::env::var("BOT_HTTP_RETRIES")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(3);
-    let base_backoff_ms = std::env::var("BOT_HTTP_BACKOFF_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(250);
-    let max_backoff_ms = std::env::var("BOT_HTTP_BACKOFF_MAX_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(2_000);
-
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..=retries {
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = Some(anyhow!("Ping failed: {e}"));
-                if attempt < retries {
-                    let backoff = (base_backoff_ms.saturating_mul(1u64 << attempt)).min(max_backoff_ms);
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                    continue;
-                }
-                break;
-            }
-        };
-
-        let status = resp.status();
-        if status.as_u16() == 429 || status.is_server_error() {
-            let text = resp.text().await.unwrap_or_default();
-            last_err = Some(anyhow!("Ping returned {status}: {text}"));
-            if attempt < retries {
-                let backoff = (base_backoff_ms.saturating_mul(1u64 << attempt)).min(max_backoff_ms);
-                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                continue;
-            }
-            break;
-        }
-
-        resp.error_for_status()?;
-        return Ok(());
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || client.get(&url)).await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("Ping returned {status}: {text}"));
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow!("Ping failed")))
+    Ok(())
 }
 
 async fn detect_public_ip(client: &Client) -> Option<String> {

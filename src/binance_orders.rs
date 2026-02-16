@@ -5,6 +5,8 @@ use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
+use crate::http_policy::{send_with_retry, HttpPolicy};
+
 type HmacSha256 = Hmac<Sha256>;
 
 fn now_ms() -> u64 {
@@ -29,16 +31,15 @@ pub async fn test_order(
     base: &str,
     query: &str,
 ) -> Result<()> {
-    let ts = now_ms();
-    let full_query = format!("{query}&timestamp={ts}");
-    let sig = sign(api_secret, &full_query);
-    let url = format!("{base}/api/v3/order/test?{full_query}&signature={sig}");
-
-    let resp = client
-        .post(url)
-        .header("X-MBX-APIKEY", api_key)
-        .send()
-        .await?;
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || {
+        let ts = now_ms();
+        let full_query = format!("{query}&timestamp={ts}");
+        let sig = sign(api_secret, &full_query);
+        let url = format!("{base}/api/v3/order/test?{full_query}&signature={sig}");
+        client.post(url).header("X-MBX-APIKEY", api_key)
+    })
+    .await?;
 
     let status = resp.status();
     let text = resp.text().await?;
@@ -64,16 +65,15 @@ pub async fn place_order(
     base: &str,
     query: &str,
 ) -> Result<OrderAck> {
-    let ts = now_ms();
-    let full_query = format!("{query}&timestamp={ts}");
-    let sig = sign(api_secret, &full_query);
-    let url = format!("{base}/api/v3/order?{full_query}&signature={sig}");
-
-    let resp = client
-        .post(url)
-        .header("X-MBX-APIKEY", api_key)
-        .send()
-        .await?;
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || {
+        let ts = now_ms();
+        let full_query = format!("{query}&timestamp={ts}");
+        let sig = sign(api_secret, &full_query);
+        let url = format!("{base}/api/v3/order?{full_query}&signature={sig}");
+        client.post(url).header("X-MBX-APIKEY", api_key)
+    })
+    .await?;
 
     let status = resp.status();
     let text = resp.text().await?;
@@ -107,16 +107,15 @@ pub async fn get_order(
     symbol: &str,
     order_id: u64,
 ) -> Result<OrderStatus> {
-    let ts = now_ms();
-    let query = format!("symbol={symbol}&orderId={order_id}&timestamp={ts}");
-    let sig = sign(api_secret, &query);
-    let url = format!("{base}/api/v3/order?{query}&signature={sig}");
-
-    let resp = client
-        .get(url)
-        .header("X-MBX-APIKEY", api_key)
-        .send()
-        .await?;
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || {
+        let ts = now_ms();
+        let query = format!("symbol={symbol}&orderId={order_id}&timestamp={ts}");
+        let sig = sign(api_secret, &query);
+        let url = format!("{base}/api/v3/order?{query}&signature={sig}");
+        client.get(url).header("X-MBX-APIKEY", api_key)
+    })
+    .await?;
 
     let status = resp.status();
     let text = resp.text().await?;
@@ -144,17 +143,16 @@ pub async fn my_trades_for_order(
     symbol: &str,
     order_id: u64,
 ) -> Result<Vec<MyTrade>> {
-    let ts = now_ms();
-    // myTrades supports filtering by orderId.
-    let query = format!("symbol={symbol}&orderId={order_id}&timestamp={ts}");
-    let sig = sign(api_secret, &query);
-    let url = format!("{base}/api/v3/myTrades?{query}&signature={sig}");
-
-    let resp = client
-        .get(url)
-        .header("X-MBX-APIKEY", api_key)
-        .send()
-        .await?;
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || {
+        let ts = now_ms();
+        // myTrades supports filtering by orderId.
+        let query = format!("symbol={symbol}&orderId={order_id}&timestamp={ts}");
+        let sig = sign(api_secret, &query);
+        let url = format!("{base}/api/v3/myTrades?{query}&signature={sig}");
+        client.get(url).header("X-MBX-APIKEY", api_key)
+    })
+    .await?;
 
     let status = resp.status();
     let text = resp.text().await?;

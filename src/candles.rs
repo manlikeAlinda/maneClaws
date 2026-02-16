@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use tokio::time::sleep;
+
+use crate::http_policy::{send_with_retry, HttpPolicy};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Candle {
@@ -162,52 +163,17 @@ pub async fn fetch_klines_from_base(
         limit
     );
 
-    let retries = std::env::var("BOT_HTTP_RETRIES")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(3);
-    let base_backoff_ms = std::env::var("BOT_HTTP_BACKOFF_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(250);
-    let max_backoff_ms = std::env::var("BOT_HTTP_BACKOFF_MAX_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(2_000);
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || client.get(&url)).await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
 
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..=retries {
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = Some(anyhow!("Klines request failed: {e}"));
-                if attempt < retries {
-                    let backoff = (base_backoff_ms.saturating_mul(1u64 << attempt)).min(max_backoff_ms);
-                    sleep(Duration::from_millis(backoff)).await;
-                    continue;
-                }
-                break;
-            }
-        };
-
-        let status = resp.status();
-        if status.as_u16() == 429 || status.is_server_error() {
-            let text = resp.text().await.unwrap_or_default();
-            last_err = Some(anyhow!("Klines returned {status}: {text}"));
-            if attempt < retries {
-                let backoff = (base_backoff_ms.saturating_mul(1u64 << attempt)).min(max_backoff_ms);
-                sleep(Duration::from_millis(backoff)).await;
-                continue;
-            }
-            break;
-        }
-
-        let resp = resp.error_for_status()?;
-        let body = resp.json::<serde_json::Value>().await?;
-        return parse_klines_body(&body);
+    if !status.is_success() {
+        return Err(anyhow!("Klines returned {status}: {text}"));
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow!("Klines request failed")))
+    let body = serde_json::from_str::<serde_json::Value>(&text)?;
+    parse_klines_body(&body)
 }
 
 pub async fn fetch_klines_cached(
