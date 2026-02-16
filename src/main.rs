@@ -57,10 +57,24 @@ async fn main() -> Result<()> {
     info!("Lock path: {}", rp.lock_path.display());
 
     // Single-instance guard (P0 safety): prevent two bots from trading at once.
-    let _instance_lock = binance_survival_bot::single_instance::SingleInstanceLock::acquire(
+    let _instance_lock = match binance_survival_bot::single_instance::SingleInstanceLock::acquire(
         &rp.lock_path,
-    )?;
-    debug!("Single-instance lock acquired: {}", rp.lock_path.display());
+    ) {
+        Ok(l) => {
+            debug!("Single-instance lock acquired: {}", rp.lock_path.display());
+            l
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("lock busy") {
+                info!(
+                    "Another bot instance is already running (lock busy). Exiting cleanly."
+                );
+                return Ok(());
+            }
+            return Err(e);
+        }
+    };
 
     let (key_before_present, _key_before_len) = env_present_len("BINANCE_API_KEY");
     let (sec_before_present, _sec_before_len) = env_present_len("BINANCE_API_SECRET");
