@@ -51,6 +51,8 @@ pub enum Position {
         last_peak_time_ms: u64,
         #[serde(default)]
         stop_order_id: Option<u64>,
+        #[serde(default)]
+        exchange_stop_price: Option<f64>,
     },
 }
 
@@ -197,6 +199,7 @@ impl BotState {
             entry_time_ms: now_ms,
             last_peak_time_ms: now_ms,
             stop_order_id: None,
+            exchange_stop_price: None,
         };
         // Stop id belongs to the new position lifecycle.
         self.last_stop_order_id = None;
@@ -226,16 +229,43 @@ impl BotState {
         (false, unlocked_now)
     }
 
-    pub fn set_stop_order_id(&mut self, order_id: u64) {
-        if let Position::Long { stop_order_id, .. } = &mut self.position {
+    pub fn set_stop_order(&mut self, order_id: u64, stop_price: f64) {
+        if let Position::Long {
+            stop_order_id,
+            exchange_stop_price,
+            ..
+        } = &mut self.position
+        {
             *stop_order_id = Some(order_id);
+            if stop_price.is_finite() && stop_price > 0.0 {
+                *exchange_stop_price = Some(stop_price);
+            }
         }
         self.last_stop_order_id = Some(order_id);
     }
 
     pub fn clear_stop_order_id_in_position(&mut self) {
-        if let Position::Long { stop_order_id, .. } = &mut self.position {
+        if let Position::Long {
+            stop_order_id,
+            exchange_stop_price,
+            ..
+        } = &mut self.position
+        {
             *stop_order_id = None;
+            *exchange_stop_price = None;
+        }
+    }
+
+    pub fn set_exchange_stop_price_from_exchange(&mut self, stop_price: f64) {
+        if !(stop_price.is_finite() && stop_price > 0.0) {
+            return;
+        }
+        if let Position::Long {
+            exchange_stop_price,
+            ..
+        } = &mut self.position
+        {
+            *exchange_stop_price = Some(stop_price);
         }
     }
 

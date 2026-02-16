@@ -1291,7 +1291,7 @@ pub async fn run_once_core(
                             .await
                             {
                                 Ok(Some(stop_order_id)) => {
-                                    st.set_stop_order_id(stop_order_id);
+                                    st.set_stop_order(stop_order_id, stop);
                                     info!("We placed a real safety stop on the exchange.");
                                 }
                                 Ok(None) => {
@@ -1472,7 +1472,10 @@ pub async fn run_once_core(
                             }
 
                             if let Some(sp) = st_order.stop_price.as_deref() {
-                                existing_stop_price = parse_f64_field("stopPrice", sp).ok();
+                                if let Ok(p) = parse_f64_field("stopPrice", sp) {
+                                    existing_stop_price = Some(p);
+                                    st.set_exchange_stop_price_from_exchange(p);
+                                }
                             }
                         }
                         Err(e) => {
@@ -1484,6 +1487,16 @@ pub async fn run_once_core(
                         }
                     }
                 }
+            }
+
+            if existing_stop_price.is_none() {
+                existing_stop_price = match &st.position {
+                    state::Position::Long {
+                        exchange_stop_price: Some(p),
+                        ..
+                    } => Some(*p),
+                    _ => None,
+                };
             }
 
             // Defined ranging exit for mean reversion: take profit at mid-band with RSI recovery.
@@ -1708,7 +1721,7 @@ pub async fn run_once_core(
                                 .await
                                 {
                                     Ok(Some(new_oid)) => {
-                                        st.set_stop_order_id(new_oid);
+                                        st.set_stop_order(new_oid, desired_stop);
                                         persist_state(&cfg.state_path, &st)?;
                                         debug!("Exchange stop reconciled: order_id={}", new_oid);
                                     }
