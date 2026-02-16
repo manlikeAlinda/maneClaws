@@ -18,5 +18,6 @@ pub mod pipeline;
 pub mod persist;
 pub mod paths;
 
+pub(crate) mod money;
 pub mod app;
 pub mod backtest;

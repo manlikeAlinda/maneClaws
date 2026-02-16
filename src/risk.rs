@@ -1,5 +1,6 @@
 use crate::regime::Regime;
-use crate::sizing;
+use crate::{money, sizing::ensure_min_notional_dec};
+use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
 pub enum RiskDecision {
@@ -85,47 +86,96 @@ pub fn size_entry_long(
         r *= 0.25;
     }
 
-    let risk_usdt = equity_usdt * r;
+    let Ok(equity_d) = money::dec_from_f64(equity_usdt) else {
+        return RiskDecision::Block {
+            reason: "Bad equity value. We stop.".to_string(),
+            hibernate: true,
+        };
+    };
+    let Ok(usdt_free_d) = money::dec_from_f64(usdt_free) else {
+        return RiskDecision::Block {
+            reason: "Bad wallet value. We stop.".to_string(),
+            hibernate: true,
+        };
+    };
+    let Ok(entry_d) = money::dec_from_f64(entry_price) else {
+        return RiskDecision::Block {
+            reason: "Bad entry price. We skip.".to_string(),
+            hibernate: false,
+        };
+    };
+    let Ok(stop_d) = money::dec_from_f64(stop_price) else {
+        return RiskDecision::Block {
+            reason: "Bad stop price. We skip.".to_string(),
+            hibernate: false,
+        };
+    };
+    let Ok(step_d) = money::dec_from_f64(step_size) else {
+        return RiskDecision::Block {
+            reason: "Bad step size. We skip.".to_string(),
+            hibernate: false,
+        };
+    };
+    let Ok(min_notional_d) = money::dec_from_f64(min_notional) else {
+        return RiskDecision::Block {
+            reason: "Bad min_notional. We skip.".to_string(),
+            hibernate: false,
+        };
+    };
+    let Ok(r_d) = money::dec_from_f64(r) else {
+        return RiskDecision::Block {
+            reason: "Bad risk fraction. We skip.".to_string(),
+            hibernate: false,
+        };
+    };
 
-    let stop_distance = entry_price - stop_price;
-    if stop_distance <= 0.0 {
+    let risk_usdt_d = equity_d * r_d;
+
+    let stop_distance_d = entry_d - stop_d;
+    if stop_distance_d <= Decimal::ZERO {
         return RiskDecision::Block {
             reason: "Stop price is not below entry. We skip.".to_string(),
             hibernate: false,
         };
     }
 
-    let qty_raw = risk_usdt / stop_distance;
-    if !qty_raw.is_finite() || qty_raw <= 0.0 {
+    let qty_raw_d = risk_usdt_d / stop_distance_d;
+    if qty_raw_d <= Decimal::ZERO {
         return RiskDecision::Block {
             reason: "Bad position size. We skip.".to_string(),
             hibernate: false,
         };
     }
 
-    let qty = sizing::round_down_to_step(qty_raw, step_size);
-    if qty <= 0.0 {
+    let qty_d = money::round_down_to_step_dec(qty_raw_d, step_d);
+    if qty_d <= Decimal::ZERO {
         return RiskDecision::Block {
             reason: "Size became too small after rounding. We wait.".to_string(),
             hibernate: false,
         };
     }
 
-    let notional = entry_price * qty;
-    if notional + 1e-12 < min_notional {
+    if ensure_min_notional_dec(entry_d, qty_d, min_notional_d).is_err() {
         return RiskDecision::Block {
             reason: "Trade is too small for Binance rules. We wait.".to_string(),
             hibernate: false,
         };
     }
 
+    let notional_d = money::notional_dec(entry_d, qty_d);
+
     // Fee buffer: require a little extra USDT.
-    if usdt_free + 1e-12 < notional * 1.01 {
+    let needed = notional_d * money::dec_from_str("1.01").unwrap_or(Decimal::ONE);
+    if usdt_free_d + money::tolerance_usdt() < needed {
         return RiskDecision::Block {
             reason: "Not enough USDT free for this ride. We wait.".to_string(),
             hibernate: false,
         };
     }
+
+    let qty = money::f64_from_dec(qty_d).unwrap_or(0.0);
+    let notional = money::f64_from_dec(notional_d).unwrap_or(0.0);
+    let risk_usdt = money::f64_from_dec(risk_usdt_d).unwrap_or(equity_usdt * r);
 
     RiskDecision::Allow {
         qty,

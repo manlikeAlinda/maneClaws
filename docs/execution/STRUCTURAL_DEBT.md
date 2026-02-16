@@ -34,7 +34,7 @@ Status: COMPLETE (cache reads quarantine unreadable/invalid JSON and treat as mi
 - Impact: Rounding/precision edge cases; can produce off-by-a-tick/step behavior and drift in PnL/equity accounting.
 - Suggested remedy: Introduce fixed-point integers (e.g., satoshis, cents) or a decimal type for accounting; keep `f64` only for indicators if desired.
 
-Status: DEFERRED (large cross-cutting change across state/risk/sizing/execution; deferred to avoid a risky, oversized diff).
+Status: COMPLETE (uses `rust_decimal` internally for step rounding, notional/min-notional and affordability checks; keeps external/public types and persisted state as `f64` with conversions at boundaries).
 
 ### DEBT-004 (P1) Retry/backoff has no jitter
 - Symptom: Exponential backoff is deterministic; multiple instances (or retries across multiple endpoints) can synchronize.
