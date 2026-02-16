@@ -83,6 +83,8 @@ pub struct BotState {
     pub is_dead: bool,
     pub peak_equity_usdt: f64,
     pub position: Position,
+    #[serde(default)]
+    pub last_stop_order_id: Option<u64>,
     pub cooldown_until_ms: u64,
     pub hibernation_until_ms: u64,
     pub daily_loss_start_equity_usdt: f64,
@@ -105,6 +107,7 @@ impl Default for BotState {
             is_dead: false,
             peak_equity_usdt: 0.0,
             position: Position::Flat,
+            last_stop_order_id: None,
             cooldown_until_ms: 0,
             hibernation_until_ms: 0,
             daily_loss_start_equity_usdt: 0.0,
@@ -129,6 +132,7 @@ impl BotState {
             is_dead: false,
             peak_equity_usdt: starting_usdt,
             position: Position::Flat,
+            last_stop_order_id: None,
             cooldown_until_ms: 0,
             hibernation_until_ms: 0,
             daily_loss_start_equity_usdt: starting_usdt,
@@ -194,6 +198,8 @@ impl BotState {
             last_peak_time_ms: now_ms,
             stop_order_id: None,
         };
+        // Stop id belongs to the new position lifecycle.
+        self.last_stop_order_id = None;
     }
 
     pub fn eval_death_and_unlock(&mut self, equity_usdt: f64, _now_ms: u64) -> (bool, bool) {
@@ -224,6 +230,17 @@ impl BotState {
         if let Position::Long { stop_order_id, .. } = &mut self.position {
             *stop_order_id = Some(order_id);
         }
+        self.last_stop_order_id = Some(order_id);
+    }
+
+    pub fn clear_stop_order_id_in_position(&mut self) {
+        if let Position::Long { stop_order_id, .. } = &mut self.position {
+            *stop_order_id = None;
+        }
+    }
+
+    pub fn clear_last_stop_order_id(&mut self) {
+        self.last_stop_order_id = None;
     }
 
     pub fn exit_to_flat_with_cooldown(&mut self, now_ms: u64) {

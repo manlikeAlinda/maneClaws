@@ -155,6 +155,25 @@ pub async fn place_stop_loss_limit_sell(
     }
 }
 
+pub async fn cancel_order(
+    client: &Client,
+    mode: Mode,
+    api_key: &str,
+    api_secret: &str,
+    base: &str,
+    symbol: &str,
+    order_id: u64,
+) -> Result<()> {
+    match mode {
+        Mode::Practice => Ok(()),
+        Mode::Live => {
+            let _ = binance_orders::cancel_order(client, api_key, api_secret, base, symbol, order_id)
+                .await?;
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

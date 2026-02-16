@@ -73,3 +73,5 @@ Status: COMPLETE (moved verbose signing/audit logs behind debug; audit JSON is s
 - Evidence: [src/state.rs](../../src/state.rs#L90-L200), [src/execution.rs](../../src/execution.rs#L1-L220)
 - Impact: Potential for orphaned stop orders if flow changes or if orders are partially filled/canceled.
 - Suggested remedy: Centralize stop-order management (place/replace/cancel) with explicit reconciliation steps.
+
+Status: COMPLETE (tracks stop id across state transitions, cancels orphaned stops when flat, cancels before manual exit, and replaces missing/stale stops in LIVE mode).

@@ -79,6 +79,10 @@ pub struct OrderStatus {
     pub executed_qty: String,
     #[serde(rename = "cummulativeQuoteQty")]
     pub cummulative_quote_qty: String,
+    // Optional fields (present on many endpoints) used for stop-loss reconciliation.
+    pub price: Option<String>,
+    #[serde(rename = "stopPrice")]
+    pub stop_price: Option<String>,
     pub side: Option<String>,
     #[serde(rename = "type")]
     pub order_type: Option<String>,
@@ -107,6 +111,34 @@ pub async fn get_order(
     let text = resp.text().await?;
     if !status.is_success() {
         return Err(anyhow!("Order status failed: status={status}, body={text}"));
+    }
+
+    Ok(serde_json::from_str::<OrderStatus>(&text)?)
+}
+
+pub async fn cancel_order(
+    client: &Client,
+    api_key: &str,
+    api_secret: &str,
+    base: &str,
+    symbol: &str,
+    order_id: u64,
+) -> Result<OrderStatus> {
+    ensure_time_synced(client, base).await?;
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || {
+        let ts = now_ms_with_offset();
+        let query = format!("symbol={symbol}&orderId={order_id}&timestamp={ts}");
+        let sig = sign_hmac_sha256_hex(api_secret, &query);
+        let url = format!("{base}/api/v3/order?{query}&signature={sig}");
+        client.delete(url).header("X-MBX-APIKEY", api_key)
+    })
+    .await?;
+
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        return Err(anyhow!("Order cancel failed: status={status}, body={text}"));
     }
 
     Ok(serde_json::from_str::<OrderStatus>(&text)?)

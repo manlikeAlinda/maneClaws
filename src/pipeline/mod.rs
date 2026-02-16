@@ -653,9 +653,59 @@ pub async fn run_once_core(
 
     // 2) Long -> Flat if wallet BTC is basically empty.
     if matches!(st.position, state::Position::Long { .. }) && !btc_has_dust {
-        st.position = state::Position::Flat;
+        // If the exchange stop was filled (or the position was closed externally), we may still
+        // have an on-exchange stop order id to clean up later.
+        if let state::Position::Long {
+            stop_order_id: Some(oid),
+            ..
+        } = &st.position
+        {
+            st.last_stop_order_id = Some(*oid);
+        }
+        st.exit_to_flat_with_cooldown(md.now_ms);
         persist_state(&cfg.state_path, &st)?;
         debug!("Reconcile: Long->Flat because wallet BTC is empty.");
+    }
+
+    // Exchange stop cleanup: if we are Flat but still remember a stop id, attempt to cancel it.
+    // This prevents orphaned stops from lingering after we flatten.
+    if have_keys
+        && mode == Mode::Live
+        && matches!(st.position, state::Position::Flat)
+        && st.last_stop_order_id.is_some()
+    {
+        if let Some(oid) = st.last_stop_order_id {
+            debug!("Reconciling orphan stop order: order_id={}", oid);
+            match execution::cancel_order(
+                client,
+                mode,
+                &cfg.api_key,
+                &cfg.api_secret,
+                &cfg.base_url,
+                symbol,
+                oid,
+            )
+            .await
+            {
+                Ok(()) => {
+                    st.clear_last_stop_order_id();
+                    persist_state(&cfg.state_path, &st)?;
+                    debug!("Orphan stop canceled and cleared.");
+                }
+                Err(e) => {
+                    // Unknown order (-2011) means it may already be filled/canceled; clear to avoid loops.
+                    if is_binance_code(&e, -2011) {
+                        st.clear_last_stop_order_id();
+                        persist_state(&cfg.state_path, &st)?;
+                        debug!("Orphan stop was unknown; cleared tracking.");
+                    } else if is_binance_code(&e, -2015) {
+                        debug!("Cannot cancel orphan stop (auth rejected). Will retry later.");
+                    } else {
+                        debug!("Failed to cancel orphan stop: {}", e);
+                    }
+                }
+            }
+        }
     }
 
     // 3) Flat + BTC in wallet => ExternalInventory.
@@ -1366,7 +1416,76 @@ pub async fn run_once_core(
             decision_action = "WAIT".to_string();
             decision_reason = "external_inventory".to_string();
         }
-        state::Position::Long { qty, entry_price, .. } => {
+        state::Position::Long {
+            qty,
+            entry_price,
+            stop_order_id,
+            ..
+        } => {
+            // Stop-loss lifecycle reconciliation (LIVE only):
+            // - If the stop was filled externally, flatten memory and set cooldown.
+            // - If the stop was canceled/expired, clear id so we can re-place.
+            // - If trailing stop moved up, replace the stop order.
+            let mut existing_stop_price: Option<f64> = None;
+            if have_keys && mode == Mode::Live {
+                if let Some(oid) = stop_order_id {
+                    match binance_orders::get_order(
+                        client,
+                        &cfg.api_key,
+                        &cfg.api_secret,
+                        &cfg.base_url,
+                        symbol,
+                        oid,
+                    )
+                    .await
+                    {
+                        Ok(st_order) => {
+                            if st_order.status == "FILLED" {
+                                info!("Exchange stop filled. We are flat now.");
+                                st.exit_to_flat_with_cooldown(md.now_ms);
+                                st.clear_last_stop_order_id();
+                                persist_state(&cfg.state_path, &st)?;
+                                log_decision_summary(
+                                    run_id,
+                                    mode,
+                                    r.regime,
+                                    position_label(&st.position),
+                                    "WAIT",
+                                    "exchange_stop_filled",
+                                    Some((st.trades_today, max_trades_per_day)),
+                                    Some(risk::drawdown_fraction(st.peak_equity_usdt, st.equity_usdt)),
+                                    Some(daily_loss_fraction(st.daily_loss_start_equity_usdt, st.equity_usdt)),
+                                    Some(risk::drawdown_fraction(st.peak_equity_usdt, st.equity_usdt) >= 0.10),
+                                );
+                                return Ok(CoreOutcome {
+                                    did_place_order: false,
+                                    mode,
+                                    regime: r.regime,
+                                    decision: "WAIT".to_string(),
+                                    reason: "The exchange stop already sold the position. We rest.".to_string(),
+                                    end: "no money moved".to_string(),
+                                });
+                            }
+
+                            if matches!(st_order.status.as_str(), "CANCELED" | "EXPIRED" | "REJECTED") {
+                                st.clear_stop_order_id_in_position();
+                            }
+
+                            if let Some(sp) = st_order.stop_price.as_deref() {
+                                existing_stop_price = parse_f64_field("stopPrice", sp).ok();
+                            }
+                        }
+                        Err(e) => {
+                            if is_binance_code(&e, -2015) {
+                                debug!("Cannot reconcile stop order (auth rejected).");
+                            } else {
+                                debug!("Stop order status check failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Defined ranging exit for mean reversion: take profit at mid-band with RSI recovery.
             let range_tp = r.regime == Regime::Ranging
                 && md.price >= f.bb_mid20_5m
@@ -1419,6 +1538,31 @@ pub async fn run_once_core(
                         decision_reason =
                             "We want to sell, but Binance minimum blocks it.".to_string();
                     } else {
+                        // If we have an exchange stop order, cancel it before selling market to avoid double-sell.
+                        if have_keys && mode == Mode::Live {
+                            let stop_oid_to_cancel = match &st.position {
+                                state::Position::Long {
+                                    stop_order_id: Some(oid),
+                                    ..
+                                } => Some(*oid),
+                                _ => None,
+                            };
+                            if let Some(oid) = stop_oid_to_cancel {
+                                let _ = execution::cancel_order(
+                                    client,
+                                    mode,
+                                    &cfg.api_key,
+                                    &cfg.api_secret,
+                                    &cfg.base_url,
+                                    symbol,
+                                    oid,
+                                )
+                                .await;
+                                st.clear_stop_order_id_in_position();
+                                persist_state(&cfg.state_path, &st)?;
+                            }
+                        }
+
                         let sell_order_id = match execution::execute_sell_market(
                             client,
                             mode,
@@ -1510,6 +1654,79 @@ pub async fn run_once_core(
                 info!("{}", &why);
                 decision_action = "HOLD_LONG".to_string();
                 decision_reason = why;
+
+                // Ensure we have exchange-side protection while holding a LIVE position.
+                if have_keys && mode == Mode::Live {
+                    let (st_qty, desired_stop, current_oid) = match &st.position {
+                        state::Position::Long {
+                            qty,
+                            stop_price,
+                            stop_order_id,
+                            ..
+                        } => (*qty, *stop_price, *stop_order_id),
+                        _ => (0.0, 0.0, None),
+                    };
+
+                    if st_qty > 0.0 && desired_stop > 0.0 {
+                        let protect_qty =
+                            sizing::round_down_to_step(st_qty.min(bals.btc_free), md.step_size);
+                        if protect_qty > 0.0 {
+                            let limit_price = (desired_stop * 0.998).max(0.01);
+
+                            let should_replace = existing_stop_price
+                                .map(|old| desired_stop > old + md.tick_size)
+                                .unwrap_or(false);
+
+                            if current_oid.is_none() || should_replace {
+                                if let Some(old_oid) = current_oid {
+                                    let _ = execution::cancel_order(
+                                        client,
+                                        mode,
+                                        &cfg.api_key,
+                                        &cfg.api_secret,
+                                        &cfg.base_url,
+                                        symbol,
+                                        old_oid,
+                                    )
+                                    .await;
+                                    st.clear_stop_order_id_in_position();
+                                }
+
+                                match execution::place_stop_loss_limit_sell(
+                                    client,
+                                    mode,
+                                    &cfg.api_key,
+                                    &cfg.api_secret,
+                                    &cfg.base_url,
+                                    symbol,
+                                    protect_qty,
+                                    qty_precision,
+                                    desired_stop,
+                                    limit_price,
+                                    price_precision,
+                                )
+                                .await
+                                {
+                                    Ok(Some(new_oid)) => {
+                                        st.set_stop_order_id(new_oid);
+                                        persist_state(&cfg.state_path, &st)?;
+                                        debug!("Exchange stop reconciled: order_id={}", new_oid);
+                                    }
+                                    Ok(None) => {
+                                        debug!("Stop placement returned no order id.");
+                                    }
+                                    Err(e) => {
+                                        if is_binance_code(&e, -2015) {
+                                            debug!("Stop placement rejected (auth).");
+                                        } else {
+                                            debug!("Stop placement failed: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
