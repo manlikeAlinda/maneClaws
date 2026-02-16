@@ -138,14 +138,6 @@ pub fn save_cache(cache_dir: &Path, symbol: &str, interval: Interval, candles: &
 }
 
 pub async fn fetch_klines(
-    client: &Client,
-    symbol: &str,
-    interval: Interval,
-    limit: usize,
-) -> Result<Vec<Candle>> {
-    fetch_klines_from_base(client, "https://api.binance.com", symbol, interval, limit).await
-}
-
 pub async fn fetch_klines_from_base(
     client: &Client,
     base_url: &str,
@@ -174,25 +166,6 @@ pub async fn fetch_klines_from_base(
 
     let body = serde_json::from_str::<serde_json::Value>(&text)?;
     parse_klines_body(&body)
-}
-
-pub async fn fetch_klines_cached(
-    client: &Client,
-    symbol: &str,
-    interval: Interval,
-    limit: usize,
-    max_age: Duration,
-) -> Result<Vec<Candle>> {
-    fetch_klines_cached_from_base(
-        client,
-        "https://api.binance.com",
-        Path::new("data"),
-        symbol,
-        interval,
-        limit,
-        max_age,
-    )
-    .await
 }
 
 pub async fn fetch_klines_cached_from_base(

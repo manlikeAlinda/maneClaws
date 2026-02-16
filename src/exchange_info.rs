@@ -53,10 +53,6 @@ pub enum Filter {
     OTHER,
 }
 
-pub async fn fetch_exchange_info(client: &Client) -> Result<ExchangeInfo> {
-    fetch_exchange_info_from_base(client, "https://api.binance.com").await
-}
-
 pub async fn fetch_exchange_info_from_base(client: &Client, base_url: &str) -> Result<ExchangeInfo> {
     let url = format!("{base_url}/api/v3/exchangeInfo");
 
@@ -70,41 +66,6 @@ pub async fn fetch_exchange_info_from_base(client: &Client, base_url: &str) -> R
     }
 
     Ok(serde_json::from_str::<ExchangeInfo>(&text)?)
-}
-
-pub async fn btcusdt_rules(client: &Client) -> Result<(f64, f64, f64)> {
-    // returns: (step_size, tick_size, min_notional)
-    let info = fetch_exchange_info(client).await?;
-
-    let sym = info
-        .symbols
-        .into_iter()
-        .find(|s| s.symbol == "BTCUSDT" && s.status == "TRADING")
-        .ok_or_else(|| anyhow!("BTCUSDT not found or not trading"))?;
-
-    let mut step_size: Option<f64> = None;
-    let mut tick_size: Option<f64> = None;
-    let mut min_notional: Option<f64> = None;
-
-    for f in sym.filters {
-        match f {
-            Filter::LOT_SIZE { step_size: ss, .. } => step_size = Some(ss.parse()?),
-            Filter::PRICE_FILTER { tick_size: ts, .. } => tick_size = Some(ts.parse()?),
-            Filter::MIN_NOTIONAL { min_notional: mn } => min_notional = Some(mn.parse()?),
-            Filter::NOTIONAL { min_notional: mn, .. } => min_notional = Some(mn.parse()?),
-            _ => {}
-        }
-    }
-
-    Ok((
-        step_size.ok_or_else(|| anyhow!("Missing LOT_SIZE.stepSize"))?,
-        tick_size.ok_or_else(|| anyhow!("Missing PRICE_FILTER.tickSize"))?,
-        min_notional.ok_or_else(|| anyhow!("Missing MIN_NOTIONAL/NOTIONAL.minNotional"))?,
-    ))
-}
-
-pub async fn symbol_rules(client: &Client, symbol: &str) -> Result<(f64, f64, f64)> {
-    symbol_rules_from_base(client, "https://api.binance.com", symbol).await
 }
 
 pub async fn symbol_rules_from_base(

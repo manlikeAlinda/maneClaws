@@ -147,8 +147,14 @@ async fn main() -> Result<()> {
 
     let client = Client::new();
 
+    let base_url = env::var("BOT_BASE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://api.binance.com".to_string());
+
     let cfg = binance_survival_bot::app::AppConfig {
-        base_url: "https://api.binance.com".to_string(),
+        base_url,
         symbol: "BTCUSDT".to_string(),
         state_path: rp.state_path.display().to_string(),
         data_dir: rp.data_dir.display().to_string(),
