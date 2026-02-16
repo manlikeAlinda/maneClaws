@@ -15,6 +15,7 @@ pub mod state;
 pub mod log_say;
 pub mod single_instance;
 pub mod pipeline;
+pub mod persist;
 pub mod paths;
 
 pub mod app;

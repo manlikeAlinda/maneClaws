@@ -26,6 +26,8 @@ Status: COMPLETE (extracted core orchestration into `pipeline::run_once_core` an
 - Impact: A partial write (crash/interrupt) could poison subsequent runs until cache expires; error recovery is weaker than state persistence.
 - Suggested remedy: Reuse the state-style atomic write pattern for cache writes, plus quarantine invalid JSON.
 
+Status: COMPLETE (cache reads quarantine unreadable/invalid JSON and treat as miss; writes use shared atomic helper).
+
 ### DEBT-003 (P2) Monetary values use `f64` end-to-end
 - Symptom: USDT/BTC quantities, fees, equity, and risk sizing are all represented as floating point.
 - Evidence: [src/state.rs](../../src/state.rs#L1-L456), [src/risk.rs](../../src/risk.rs#L1-L260), [src/sizing.rs](../../src/sizing.rs#L1-L260)

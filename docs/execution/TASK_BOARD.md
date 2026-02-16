@@ -2,7 +2,6 @@
 
 ## TODO
 
-- DEBT-002 Candle cache atomic writes + quarantine
 - DEBT-003 Money type (fixed/decimal) for accounting
 - DEBT-004 HTTP retry jitter + Retry-After
 - DEBT-005 Shared clock offset + periodic sync
@@ -19,6 +18,7 @@
 ## COMPLETE
 
 - DEBT-001 Extract pipeline stages from `run_once`
+- DEBT-002 Candle cache atomic writes + quarantine
 
 - SD-001 Base directory + path resolution centralization
 - SD-002 Scheduler determinism + live latch

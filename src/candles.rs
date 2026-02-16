@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::http_policy::{send_with_retry, HttpPolicy};
+use crate::persist;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Candle {
@@ -120,10 +121,20 @@ pub fn load_cached(cache_dir: &Path, symbol: &str, interval: Interval, max_age: 
         return Ok(None);
     }
 
-    let s = fs::read_to_string(&path)
-        .with_context(|| format!("Failed reading candle cache: {}", path.display()))?;
-    let candles = serde_json::from_str::<Vec<Candle>>(&s)
-        .with_context(|| format!("Failed parsing candle cache: {}", path.display()))?;
+    let s = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = persist::quarantine_corrupt_file(&path, "unreadable");
+            return Ok(None);
+        }
+    };
+    let candles = match serde_json::from_str::<Vec<Candle>>(&s) {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = persist::quarantine_corrupt_file(&path, "invalid_json");
+            return Ok(None);
+        }
+    };
     Ok(Some(candles))
 }
 
@@ -133,7 +144,8 @@ pub fn save_cache(cache_dir: &Path, symbol: &str, interval: Interval, candles: &
         fs::create_dir_all(parent)?;
     }
     let s = serde_json::to_string_pretty(candles)?;
-    fs::write(&path, s).with_context(|| format!("Failed writing candle cache: {}", path.display()))?;
+    persist::atomic_write_with_prev(&path, &s)
+        .with_context(|| format!("Failed writing candle cache: {}", path.display()))?;
     Ok(())
 }
 
