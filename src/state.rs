@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 fn ms(hours: u64) -> u64 {
     hours * 60 * 60 * 1000
@@ -24,6 +25,95 @@ pub fn today_yyyymmdd_utc() -> String {
     let now = time::OffsetDateTime::now_utc();
     let fmt = time::macros::format_description!("[year][month][day]");
     now.format(&fmt).unwrap_or_else(|_| "19700101".to_string())
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bot_state.json");
+    parent.join(format!("{file_name}{suffix}"))
+}
+
+fn move_file_best_effort(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed creating dir: {}", parent.display()))?;
+    }
+
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(src, dst)
+                .with_context(|| format!("Failed copying {} -> {}", src.display(), dst.display()))?;
+            fs::remove_file(src)
+                .with_context(|| format!("Failed removing after copy: {}", src.display()))?;
+            Ok(())
+        }
+    }
+}
+
+fn quarantine_corrupt_file(path: &Path, reason: &str) -> Result<PathBuf> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let quarantine_dir = parent.join("quarantine");
+    fs::create_dir_all(&quarantine_dir)
+        .with_context(|| format!("Failed creating quarantine dir: {}", quarantine_dir.display()))?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bot_state.json");
+    let ts = now_ms();
+    let pid = std::process::id();
+    let dst = quarantine_dir.join(format!("{file_name}.corrupt.{reason}.{ts}.{pid}"));
+    move_file_best_effort(path, &dst)?;
+    Ok(dst)
+}
+
+fn atomic_write_with_prev(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed creating state dir: {}", parent.display()))?;
+    }
+
+    let ts = now_ms();
+    let pid = std::process::id();
+    let tmp_path = path_with_suffix(path, &format!(".tmp.{ts}.{pid}"));
+
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .with_context(|| format!("Failed opening temp state file: {}", tmp_path.display()))?;
+        f.write_all(contents.as_bytes())
+            .with_context(|| format!("Failed writing temp state file: {}", tmp_path.display()))?;
+        f.sync_all().with_context(|| {
+            format!(
+                "Failed syncing temp state file to disk: {}",
+                tmp_path.display()
+            )
+        })?;
+    }
+
+    let prev_path = path_with_suffix(path, ".prev");
+    if path.exists() {
+        let _ = fs::remove_file(&prev_path);
+        move_file_best_effort(path, &prev_path)
+            .with_context(|| format!("Failed moving old state to prev: {}", prev_path.display()))?;
+    }
+
+    if let Err(e) = move_file_best_effort(&tmp_path, path) {
+        // Best effort rollback.
+        let _ = fs::remove_file(&tmp_path);
+        if !path.exists() && prev_path.exists() {
+            let _ = move_file_best_effort(&prev_path, path);
+        }
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -221,9 +311,42 @@ impl BotState {
 }
 
 pub fn load_or_init(path: &str, starting_usdt: f64) -> Result<BotState> {
-    if Path::new(path).exists() {
-        let s = fs::read_to_string(path)?;
-        let mut st = serde_json::from_str::<BotState>(&s)?;
+    let path = Path::new(path);
+    let prev_path = path_with_suffix(path, ".prev");
+
+    // If we previously failed mid-write, prefer restoring the last known-good state.
+    if !path.exists() && prev_path.exists() {
+        let _ = move_file_best_effort(&prev_path, path);
+    }
+
+    if path.exists() {
+        let s = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = quarantine_corrupt_file(path, "unreadable");
+                return Ok(BotState::new(starting_usdt));
+            }
+        };
+
+        let mut st = match serde_json::from_str::<BotState>(&s) {
+            Ok(st) => st,
+            Err(e) => {
+                let _ = quarantine_corrupt_file(path, "invalid_json");
+
+                // Best-effort recovery from previous snapshot.
+                if prev_path.exists() {
+                    if let Ok(prev_s) = fs::read_to_string(&prev_path) {
+                        if let Ok(prev_st) = serde_json::from_str::<BotState>(&prev_s) {
+                            let _ = save(path.to_string_lossy().as_ref(), &prev_st);
+                            return Ok(prev_st);
+                        }
+                    }
+                }
+
+                let _ = e;
+                return Ok(BotState::new(starting_usdt));
+            }
+        };
         if st.starting_usdt <= 0.0 {
             st.starting_usdt = starting_usdt;
         }
@@ -244,7 +367,7 @@ pub fn load_or_init(path: &str, starting_usdt: f64) -> Result<BotState> {
 
 pub fn save(path: &str, state: &BotState) -> Result<()> {
     let s = serde_json::to_string_pretty(state)?;
-    fs::write(path, s)?;
+    atomic_write_with_prev(Path::new(path), &s)?;
     Ok(())
 }
 

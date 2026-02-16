@@ -2,7 +2,6 @@
 
 ## TODO
 
-- SD-005 Atomic state persistence
 - SD-006 Centralize HTTP retry/backoff config
 - SD-004 Consolidate signing + time utilities
 - SD-007 Enforce base_url injection everywhere
@@ -16,5 +15,6 @@
 - SD-001 Base directory + path resolution centralization
 - SD-002 Scheduler determinism + live latch
 - SD-003 Unify locking story
+- SD-005 Atomic state persistence + corrupt quarantine
 
 ## BLOCKED
