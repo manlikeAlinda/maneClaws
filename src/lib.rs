@@ -21,3 +21,7 @@ pub mod paths;
 pub(crate) mod money;
 pub mod app;
 pub mod backtest;
+pub mod dashboard;
+pub mod telemetry;
+pub mod report;
+pub mod history;

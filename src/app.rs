@@ -93,7 +93,11 @@ async fn ping(client: &Client, base_url: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_once(client: &Client, cfg: &AppConfig) -> Result<RunOutcome> {
+pub async fn run_once(
+    client: &Client,
+    cfg: &AppConfig,
+    snap: &crate::dashboard::SharedSnapshot,
+) -> Result<RunOutcome> {
     let mode = execution::mode_from_env();
     let run_id = new_run_id();
     log_say::say_start(mode, &run_id);
@@ -119,7 +123,7 @@ pub async fn run_once(client: &Client, cfg: &AppConfig) -> Result<RunOutcome> {
         }
     }
 
-    let out = pipeline::run_once_core(client, cfg, &run_id, mode).await?;
+    let out = pipeline::run_once_core(client, cfg, &run_id, mode, snap).await?;
     guard.set_decision(&out.decision);
     guard.set_reason(&out.reason);
     guard.set_end(&out.end);

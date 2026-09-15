@@ -5,16 +5,33 @@ use anyhow::{anyhow, Result};
 pub struct Features {
     pub ema20_1h: f64,
     pub ema50_1h: f64,
+    /// 200-period EMA on 1h candles — higher-timeframe trend anchor.
+    pub ema200_1h: f64,
     pub ema20_5m: f64,
     pub ema50_5m: f64,
+    pub ema20_1m: f64,
     pub atr14_5m: f64,
+    pub atr14_1m: f64,
+    /// ATR14 / ATR50 on 5m. <0.8 → squeeze (compression), >1.5 → elevated vol.
+    pub atr_ratio_5m: f64,
     pub bb_mid20_5m: f64,
+    /// Bollinger Band upper (mid + 2σ, 20-period, 5m).
+    pub bb_upper_5m: f64,
+    /// Bollinger Band lower (mid − 2σ, 20-period, 5m).
+    pub bb_lower_5m: f64,
+    /// Normalised BB width: (upper − lower) / mid. Squeeze when < 0.02.
+    pub bb_width_5m: f64,
     pub rsi14_5m: f64,
+    pub rsi14_1m: f64,
     pub donchian_high20_5m: f64,
     pub donchian_low20_5m: f64,
     pub rv_short: f64,
     pub rv_long: f64,
     pub volume_z: f64,
+    pub velocity_1m: f64,
+    /// % price change over last 3 five-minute bars — medium-term momentum proxy.
+    pub velocity_5m: f64,
+    pub last_close_1m: f64,
     pub last_close_5m: f64,
     pub last_close_1h: f64,
 }
@@ -191,6 +208,35 @@ pub fn zscore_last(values: &[f64], lookback: usize) -> Result<f64> {
     Ok((last - mean) / std)
 }
 
+/// Returns (mid, upper, lower, width) for a standard 2-σ Bollinger Band.
+/// width = (upper − lower) / mid (normalised).
+fn bb_bands(values: &[f64], period: usize) -> Result<(f64, f64, f64, f64)> {
+    if period == 0 {
+        return Err(anyhow!("BB period must be > 0"));
+    }
+    if values.len() < period {
+        return Err(anyhow!(
+            "Not enough data for BB{}: have {}, need {}",
+            period,
+            values.len(),
+            period
+        ));
+    }
+    let slice = &values[values.len() - period..];
+    let mid = slice.iter().sum::<f64>() / period as f64;
+    let var = slice.iter().map(|v| (v - mid).powi(2)).sum::<f64>() / period as f64;
+    let std = var.sqrt();
+    let upper = mid + 2.0 * std;
+    let lower = mid - 2.0 * std;
+    let width = if mid.abs() > 1e-12 {
+        (upper - lower) / mid
+    } else {
+        0.0
+    };
+    Ok((mid, upper, lower, width))
+}
+
+#[allow(dead_code)]
 fn sma_last(values: &[f64], period: usize) -> Result<f64> {
     if period == 0 {
         return Err(anyhow!("SMA period must be > 0"));
@@ -243,20 +289,35 @@ fn rsi_last(closes: &[f64], period: usize) -> Result<f64> {
     Ok(100.0 - (100.0 / (1.0 + rs)))
 }
 
-pub fn compute_features(candles_5m: &[Candle], candles_1h: &[Candle]) -> Result<Features> {
+pub fn compute_features(
+    candles_1m: &[Candle],
+    candles_5m: &[Candle],
+    candles_1h: &[Candle],
+) -> Result<Features> {
+    let closes_1m = closes(candles_1m);
     let closes_5m = closes(candles_5m);
     let closes_1h = closes(candles_1h);
 
+    let last_close_1m = *closes_1m.last().ok_or_else(|| anyhow!("No 1m candles"))?;
     let last_close_5m = *closes_5m.last().ok_or_else(|| anyhow!("No 5m candles"))?;
     let last_close_1h = *closes_1h.last().ok_or_else(|| anyhow!("No 1h candles"))?;
 
+    let ema20_1m = ema_last(&closes_1m, 20)?;
     let ema20_5m = ema_last(&closes_5m, 20)?;
     let ema50_5m = ema_last(&closes_5m, 50)?;
     let ema20_1h = ema_last(&closes_1h, 20)?;
     let ema50_1h = ema_last(&closes_1h, 50)?;
+    // HTF anchor: 200-period EMA on 1h (requires 200 candles, which we always request).
+    let ema200_1h = ema_last(&closes_1h, 200)?;
 
+    let atr14_1m = atr14_last(candles_1m, 14)?;
     let atr14_5m = atr14_last(candles_5m, 14)?;
-    let bb_mid20_5m = sma_last(&closes_5m, 20)?;
+    // ATR50 for ratio-based squeeze / expansion detection.
+    let atr50_5m = atr14_last(candles_5m, 50)?;
+    let atr_ratio_5m = atr14_5m / atr50_5m.max(1e-12);
+
+    let (bb_mid20_5m, bb_upper_5m, bb_lower_5m, bb_width_5m) = bb_bands(&closes_5m, 20)?;
+    let rsi14_1m = rsi_last(&closes_1m, 14)?;
     let rsi14_5m = rsi_last(&closes_5m, 14)?;
     let (don_high, don_low) = donchian_high_low_prev(candles_5m, 20)?;
 
@@ -266,19 +327,46 @@ pub fn compute_features(candles_5m: &[Candle], candles_1h: &[Candle]) -> Result<
     let vols_5m = volumes(candles_5m);
     let volume_z = zscore_last(&vols_5m, 100)?;
 
+    // Price velocity: % change over last 3 minutes (1m bars).
+    let velocity_1m = if closes_1m.len() >= 4 {
+        let prev = closes_1m[closes_1m.len() - 4];
+        (last_close_1m - prev) / prev.max(1e-12)
+    } else {
+        0.0
+    };
+
+    // Price velocity on 5m: % change over last 3 five-minute bars (~15 min).
+    let velocity_5m = if closes_5m.len() >= 4 {
+        let prev = closes_5m[closes_5m.len() - 4];
+        (last_close_5m - prev) / prev.max(1e-12)
+    } else {
+        0.0
+    };
+
     Ok(Features {
         ema20_1h,
         ema50_1h,
+        ema200_1h,
         ema20_5m,
         ema50_5m,
+        ema20_1m,
         atr14_5m,
+        atr14_1m,
+        atr_ratio_5m,
         bb_mid20_5m,
+        bb_upper_5m,
+        bb_lower_5m,
+        bb_width_5m,
         rsi14_5m,
+        rsi14_1m,
         donchian_high20_5m: don_high,
         donchian_low20_5m: don_low,
         rv_short,
         rv_long,
         volume_z,
+        velocity_1m,
+        velocity_5m,
+        last_close_1m,
         last_close_5m,
         last_close_1h,
     })

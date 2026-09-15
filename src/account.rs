@@ -15,14 +15,25 @@ struct AccountInfo {
 struct Balance {
     asset: String,
     free: String,
-    #[allow(dead_code)]
     locked: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct SpotBalances {
     pub usdt_free: f64,
+    pub usdt_locked: f64,
     pub btc_free: f64,
+    pub btc_locked: f64,
+}
+
+impl SpotBalances {
+    pub fn usdt_total(&self) -> f64 {
+        self.usdt_free + self.usdt_locked
+    }
+
+    pub fn btc_total(&self) -> f64 {
+        self.btc_free + self.btc_locked
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -166,15 +177,28 @@ pub async fn fetch_spot_balances(
             // Success on retry.
             let acct: AccountInfo = serde_json::from_str(&text2)?;
             let mut usdt_free = 0.0_f64;
+            let mut usdt_locked = 0.0_f64;
             let mut btc_free = 0.0_f64;
+            let mut btc_locked = 0.0_f64;
             for b in acct.balances {
                 match b.asset.as_str() {
-                    "USDT" => usdt_free = b.free.parse()?,
-                    "BTC" => btc_free = b.free.parse()?,
+                    "USDT" => {
+                        usdt_free = b.free.parse()?;
+                        usdt_locked = b.locked.parse()?;
+                    }
+                    "BTC" => {
+                        btc_free = b.free.parse()?;
+                        btc_locked = b.locked.parse()?;
+                    }
                     _ => {}
                 }
             }
-            return Ok(SpotBalances { usdt_free, btc_free });
+            return Ok(SpotBalances {
+                usdt_free,
+                usdt_locked,
+                btc_free,
+                btc_locked,
+            });
         }
 
         return Err(anyhow!(BinanceApiError {
@@ -188,15 +212,28 @@ pub async fn fetch_spot_balances(
     let acct: AccountInfo = serde_json::from_str(&text)?;
 
     let mut usdt_free = 0.0_f64;
+    let mut usdt_locked = 0.0_f64;
     let mut btc_free = 0.0_f64;
+    let mut btc_locked = 0.0_f64;
 
     for b in acct.balances {
         match b.asset.as_str() {
-            "USDT" => usdt_free = b.free.parse()?,
-            "BTC" => btc_free = b.free.parse()?,
+            "USDT" => {
+                usdt_free = b.free.parse()?;
+                usdt_locked = b.locked.parse()?;
+            }
+            "BTC" => {
+                btc_free = b.free.parse()?;
+                btc_locked = b.locked.parse()?;
+            }
             _ => {}
         }
     }
 
-    Ok(SpotBalances { usdt_free, btc_free })
+    Ok(SpotBalances {
+        usdt_free,
+        usdt_locked,
+        btc_free,
+        btc_locked,
+    })
 }

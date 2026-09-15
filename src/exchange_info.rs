@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::http_policy::{send_with_retry, HttpPolicy};
+use crate::http_policy::{send_text_with_retry, HttpPolicy};
 
 #[derive(Debug, Deserialize)]
 pub struct ExchangeInfo {
@@ -54,16 +54,24 @@ pub enum Filter {
     OTHER,
 }
 
-pub async fn fetch_exchange_info_from_base(client: &Client, base_url: &str) -> Result<ExchangeInfo> {
-    let url = format!("{base_url}/api/v3/exchangeInfo");
+pub async fn fetch_exchange_info_for_symbol_from_base(
+    client: &Client,
+    base_url: &str,
+    symbol: &str,
+) -> Result<ExchangeInfo> {
+    // Binance supports querying exchangeInfo by symbol, which greatly reduces payload size.
+    // This also improves reliability in environments where large responses are intermittently empty.
+    let url = format!("{base_url}/api/v3/exchangeInfo?symbol={symbol}");
 
     let policy = HttpPolicy::from_env();
-    let resp = send_with_retry(client, &policy, || client.get(&url)).await?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let (status, text) = send_text_with_retry(client, &policy, &url, || client.get(&url)).await?;
 
     if !status.is_success() {
         return Err(anyhow!("exchangeInfo returned {status}: {text}"));
+    }
+
+    if text.trim().is_empty() {
+        return Err(anyhow!("exchangeInfo returned {status} with empty body"));
     }
 
     Ok(serde_json::from_str::<ExchangeInfo>(&text)?)
@@ -74,7 +82,7 @@ pub async fn symbol_rules_from_base(
     base_url: &str,
     symbol: &str,
 ) -> Result<(f64, f64, f64)> {
-    let info = fetch_exchange_info_from_base(client, base_url).await?;
+    let info = fetch_exchange_info_for_symbol_from_base(client, base_url, symbol).await?;
 
     let sym = info
         .symbols

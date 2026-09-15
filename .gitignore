@@ -2,11 +2,16 @@
 
 # Runtime state / local secrets
 bot_state.json
+bot_state.json.prev
 .env
 .env.*
 
 # Cached market data
 /data/
+/backtest_data/
+
+# Generated backtest reports
+backtest_*.html
 
 # Runtime logs/locks (do not commit)
 *.log
@@ -15,3 +20,10 @@ bot_state.json
 # Audit logs
 *.jsonl
 
+# Corrupted/quarantined state dumps
+/quarantine/
+
+# Local machine-specific Claude Code settings
+.claude/settings.local.json
+
+.fake

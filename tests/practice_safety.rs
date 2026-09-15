@@ -118,9 +118,17 @@ async fn start_stub_server(log: SharedLog) -> (tokio::task::JoinHandle<()>, Sock
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as i64;
-                // 200 candles of 5m spacing => 1000 minutes history.
-                let start_ms = now_ms - (200i64 * 300_000i64);
-                let body = build_klines(200, start_ms, 300_000, 80.0, 2.0);
+                
+                let spacing_ms = if path.contains("interval=1m") {
+                    60_000
+                } else if path.contains("interval=5m") {
+                    300_000
+                } else {
+                    3_600_000
+                };
+
+                let start_ms = now_ms - (200i64 * spacing_ms);
+                let body = build_klines(200, start_ms, spacing_ms, 80.0, 2.0);
                 http_response_json(&body).into_bytes()
             } else if path.starts_with("/api/v3/order/test") {
                 http_response_json("{}").into_bytes()
@@ -140,9 +148,10 @@ async fn start_stub_server(log: SharedLog) -> (tokio::task::JoinHandle<()>, Sock
 
 #[tokio::test]
 async fn practice_mode_never_calls_live_order_endpoint() {
-    // Force PRACTICE
+    // Force PRACTICE; lower score threshold so synthetic breakout clears the bar.
     unsafe {
         std::env::remove_var("BOT_LIVE_TRADING");
+        std::env::set_var("SIGNAL_MIN_SCORE", "0.15");
     }
 
     let log: SharedLog = Arc::new(Mutex::new(Vec::new()));
@@ -170,12 +179,18 @@ async fn practice_mode_never_calls_live_order_endpoint() {
         state_path: tmp.to_string_lossy().to_string(),
         data_dir: cache_dir.to_string_lossy().to_string(),
         candle_cache_max_age: Duration::from_secs(0),
-        api_key: "k".to_string(),
-        api_secret: "s".to_string(),
+        api_key: "k".repeat(32),
+        api_secret: "s".repeat(32),
     };
 
+    // Ensure no existing state file interferes.
+    if tmp.exists() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     let client = Client::new();
-    let out = app::run_once(&client, &cfg).await.unwrap();
+    let snap = binance_survival_bot::dashboard::new_shared_snapshot();
+    let out = app::run_once(&client, &cfg, &snap).await.unwrap();
     assert_eq!(out.mode, binance_survival_bot::execution::Mode::Practice);
 
     let calls = log.lock().unwrap().clone();

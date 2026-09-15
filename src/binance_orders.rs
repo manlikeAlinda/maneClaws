@@ -38,7 +38,8 @@ pub struct OrderAck {
     pub symbol: String,
     #[serde(rename = "orderId")]
     pub order_id: u64,
-    pub status: String,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 pub async fn place_order(
@@ -142,6 +143,56 @@ pub async fn cancel_order(
     }
 
     Ok(serde_json::from_str::<OrderStatus>(&text)?)
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpenOrder {
+    pub symbol: Option<String>,
+    #[serde(rename = "orderId")]
+    pub order_id: u64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub order_type: Option<String>,
+    #[serde(default)]
+    pub side: Option<String>,
+    #[serde(rename = "stopPrice")]
+    #[serde(default)]
+    pub stop_price: Option<String>,
+    #[serde(rename = "origQty")]
+    #[serde(default)]
+    pub orig_qty: Option<String>,
+}
+
+pub async fn open_orders(
+    client: &Client,
+    api_key: &str,
+    api_secret: &str,
+    base: &str,
+    symbol: &str,
+) -> Result<Vec<OpenOrder>> {
+    ensure_time_synced(client, base).await?;
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || {
+        let ts = now_ms_with_offset();
+        let query = format!("symbol={symbol}&timestamp={ts}");
+        let sig = sign_hmac_sha256_hex(api_secret, &query);
+        let url = format!("{base}/api/v3/openOrders?{query}&signature={sig}");
+        client.get(url).header("X-MBX-APIKEY", api_key)
+    })
+    .await?;
+
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "openOrders failed: status={status}, body={}",
+            text.chars().take(500).collect::<String>()
+        ));
+    }
+
+    Ok(serde_json::from_str::<Vec<OpenOrder>>(&text)?)
 }
 
 #[derive(Debug, Deserialize, Clone)]

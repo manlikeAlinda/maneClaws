@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Binance Survival Bot",
+			"type": "shell",
+			"command": "cargo run --release",
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		}
+	]
+}

@@ -3,14 +3,11 @@
 ## TODO
 
 
-
-
 ## IN_PROGRESS
 
 
-
-
 ## COMPLETE
+
 
 - DEBT-001 Extract pipeline stages from `run_once`
 - DEBT-002 Candle cache atomic writes + quarantine

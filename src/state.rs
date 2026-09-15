@@ -46,6 +46,8 @@ pub enum Position {
         qty: f64,
         initial_stop_price: f64,
         stop_price: f64,
+        #[serde(default)]
+        tp_price: Option<f64>,
         peak_price: f64,
         entry_time_ms: u64,
         last_peak_time_ms: u64,
@@ -92,6 +94,18 @@ pub struct BotState {
     pub daily_loss_start_equity_usdt: f64,
     pub day_anchor_yyyymmdd: String,
     pub trades_today: u32,
+
+    // Session tracking
+    #[serde(default)]
+    pub session_start_equity_usdt: f64,
+    #[serde(default)]
+    pub session_pnl_usdt: f64,
+
+    // Authentication safety (Soft Circuit Breaker)
+    #[serde(default)]
+    pub last_auth_error_ms: u64,
+    #[serde(default)]
+    pub auth_error_cooldown_ms: u64,
 }
 
 impl Default for BotState {
@@ -115,6 +129,10 @@ impl Default for BotState {
             daily_loss_start_equity_usdt: 0.0,
             day_anchor_yyyymmdd: day,
             trades_today: 0,
+            session_start_equity_usdt: 0.0,
+            session_pnl_usdt: 0.0,
+            last_auth_error_ms: 0,
+            auth_error_cooldown_ms: 0,
         }
     }
 }
@@ -140,6 +158,10 @@ impl BotState {
             daily_loss_start_equity_usdt: starting_usdt,
             day_anchor_yyyymmdd: day,
             trades_today: 0,
+            session_start_equity_usdt: starting_usdt,
+            session_pnl_usdt: 0.0,
+            last_auth_error_ms: 0,
+            auth_error_cooldown_ms: 0,
         }
     }
 
@@ -167,6 +189,11 @@ impl BotState {
         if self.equity_usdt <= 0.0 {
             self.is_dead = true;
         }
+
+        if self.session_start_equity_usdt <= 0.0 {
+            self.session_start_equity_usdt = equity_usdt;
+        }
+        self.session_pnl_usdt = self.equity_usdt - self.session_start_equity_usdt;
     }
 
     pub fn bump_trades_today(&mut self) {
@@ -181,6 +208,10 @@ impl BotState {
         now_ms < self.hibernation_until_ms
     }
 
+    pub fn in_auth_cooldown(&self, now_ms: u64) -> bool {
+        now_ms < self.last_auth_error_ms.saturating_add(self.auth_error_cooldown_ms)
+    }
+
     pub fn apply_fee(&mut self, fee_usdt: f64) {
         self.fees_usdt += fee_usdt;
         self.equity_usdt -= fee_usdt;
@@ -189,12 +220,13 @@ impl BotState {
         }
     }
 
-    pub fn enter_long(&mut self, entry_price: f64, qty: f64, stop_price: f64, now_ms: u64) {
+    pub fn enter_long(&mut self, entry_price: f64, qty: f64, stop_price: f64, tp_price: Option<f64>, now_ms: u64) {
         self.position = Position::Long {
             entry_price,
             qty,
             initial_stop_price: stop_price,
             stop_price,
+            tp_price,
             peak_price: entry_price,
             entry_time_ms: now_ms,
             last_peak_time_ms: now_ms,
@@ -278,8 +310,26 @@ impl BotState {
         self.cooldown_until_ms = now_ms + ms_minutes(60);
     }
 
-    pub fn manage_open_position(&mut self, current_price: f64, atr14_5m: f64, now_ms: u64) -> (PositionDecision, String) {
+    /// Evaluates position management actions for the current tick.
+    ///
+    /// `bearish_bias`: when `true` (HTF EMA stack fully bearish), the system
+    /// uses tighter trailing (1.5 ATR vs 2.2 ATR) and a shorter time-stop
+    /// (1 hour vs 2 hours) so it does not ride a position against the broader
+    /// trend for too long.
+    pub fn manage_open_position(
+        &mut self,
+        current_price: f64,
+        atr14_5m: f64,
+        now_ms: u64,
+        bearish_bias: bool,
+    ) -> (PositionDecision, String) {
         let atr = atr14_5m.max(1e-12);
+
+        // Trailing ATR multiplier: tighter when HTF is against us.
+        let trail_atr_mult = if bearish_bias { 1.5 } else { 2.2 };
+        // Time-stop patience: 1 h in bearish HTF, 2 h in normal conditions.
+        let time_stop_ms   = if bearish_bias { ms(1) } else { ms(2) };
+
         match &mut self.position {
             Position::Flat => (PositionDecision::Hold, "No position.".to_string()),
             Position::ExternalInventory { .. } => (
@@ -290,18 +340,26 @@ impl BotState {
                 entry_price,
                 initial_stop_price,
                 stop_price,
+                tp_price,
                 peak_price,
                 last_peak_time_ms,
                 ..
             } => {
+                if let Some(tp) = tp_price {
+                    if current_price >= *tp {
+                        return (PositionDecision::ExitLong, "Take-profit hit. We exit with glory.".to_string());
+                    }
+                }
                 if current_price > *peak_price {
                     *peak_price = current_price;
                     *last_peak_time_ms = now_ms;
                 }
 
                 let r = (*entry_price - *initial_stop_price).max(1e-12);
-                if current_price >= *entry_price + r {
-                    let trail = *peak_price - 2.2 * atr;
+                // Trail after +1R in normal conditions, after +0.5R when bearish.
+                let trail_trigger = if bearish_bias { *entry_price + 0.5 * r } else { *entry_price + r };
+                if current_price >= trail_trigger {
+                    let trail = *peak_price - trail_atr_mult * atr;
                     if trail > *stop_price {
                         *stop_price = trail;
                     }
@@ -311,8 +369,13 @@ impl BotState {
                     return (PositionDecision::ExitLong, "Stop hit. We exit to protect you.".to_string());
                 }
 
-                if now_ms.saturating_sub(*last_peak_time_ms) > ms(2) {
-                    return (PositionDecision::ExitLong, "Too long with no new highs. We exit.".to_string());
+                if now_ms.saturating_sub(*last_peak_time_ms) > time_stop_ms {
+                    let reason = if bearish_bias {
+                        "HTF bearish — exiting after 1h without new highs. Protecting capital.".to_string()
+                    } else {
+                        "Too long with no new highs. We exit.".to_string()
+                    };
+                    return (PositionDecision::ExitLong, reason);
                 }
 
                 (PositionDecision::Hold, "We hold the position.".to_string())
@@ -394,9 +457,9 @@ mod tests {
     #[test]
     fn trailing_stop_moves_up_after_1r() {
         let mut st = BotState::new(1000.0);
-        st.enter_long(100.0, 1.0, 90.0, 0);
+        st.enter_long(100.0, 1.0, 90.0, None, 0);
         // R = 10, so +1R is 110
-        let (_d, _msg) = st.manage_open_position(111.0, 2.0, 1);
+        let (_d, _msg) = st.manage_open_position(111.0, 2.0, 1, false);
         match st.position {
             Position::Long { stop_price, .. } => {
                 // peak 111, trail = 111 - 4.4 = 106.6
@@ -410,9 +473,35 @@ mod tests {
     #[test]
     fn time_stop_exits_after_2h_without_new_high() {
         let mut st = BotState::new(1000.0);
-        st.enter_long(100.0, 1.0, 90.0, 0);
+        st.enter_long(100.0, 1.0, 90.0, None, 0);
         // no new high, last_peak_time stays at 0
-        let (d, _msg) = st.manage_open_position(99.0, 2.0, ms(2) + 1);
+        let (d, _msg) = st.manage_open_position(99.0, 2.0, ms(2) + 1, false);
         assert_eq!(d, PositionDecision::ExitLong);
+    }
+
+    #[test]
+    fn bearish_bias_exits_after_1h_not_2h() {
+        let mut st = BotState::new(1000.0);
+        st.enter_long(100.0, 1.0, 90.0, None, 0);
+        // 1h + 1ms elapsed, no new high
+        let (d, msg) = st.manage_open_position(99.0, 2.0, ms(1) + 1, true);
+        assert_eq!(d, PositionDecision::ExitLong);
+        assert!(msg.contains("HTF bearish") || msg.contains("bearish"));
+    }
+
+    #[test]
+    fn bearish_bias_uses_tighter_trail() {
+        let mut st = BotState::new(1000.0);
+        st.enter_long(100.0, 1.0, 90.0, None, 0);
+        // +0.5R trigger = 105, ATR = 2
+        let (_d, _msg) = st.manage_open_position(106.0, 2.0, 1, true);
+        match st.position {
+            Position::Long { stop_price, .. } => {
+                // peak 106, trail = 106 - 1.5*2 = 103.0 (tighter than normal 2.2)
+                assert!(stop_price > 90.0);
+                assert!((stop_price - 103.0).abs() < 1e-6);
+            }
+            _ => panic!("expected long"),
+        }
     }
 }

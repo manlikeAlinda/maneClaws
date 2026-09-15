@@ -184,6 +184,71 @@ pub async fn send_with_retry(
     ))
 }
 
+pub async fn send_text_with_retry(
+    _client: &Client,
+    policy: &HttpPolicy,
+    context: &str,
+    mut build: impl FnMut() -> RequestBuilder,
+) -> Result<(StatusCode, String)> {
+    let mut last_err: Option<anyhow::Error> = None;
+    let request_id = REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    for attempt in 0..=policy.max_retries {
+        let req = build().timeout(policy.timeout);
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let retry_after = if status == StatusCode::TOO_MANY_REQUESTS {
+                    parse_retry_after(&resp)
+                } else {
+                    None
+                };
+
+                let text = resp.text().await.unwrap_or_default();
+
+                // If the server claims success but returns an empty body, treat as transient.
+                if status.is_success() && text.trim().is_empty() {
+                    if attempt < policy.max_retries {
+                        last_err = Some(anyhow!("{context}: HTTP {status} returned empty body"));
+                        let d = jitter_add(policy, request_id, attempt, backoff_for_attempt(policy, attempt));
+                        tokio::time::sleep(d).await;
+                        continue;
+                    }
+                    return Err(anyhow!("{context}: HTTP {status} returned empty body after retries"));
+                }
+
+                if is_retryable_status(status) && attempt < policy.max_retries {
+                    let mut d = backoff_for_attempt(policy, attempt);
+                    if let Some(ra) = retry_after {
+                        d = d.max(ra);
+                    }
+                    let d = jitter_add(policy, request_id, attempt, d);
+                    tokio::time::sleep(d).await;
+                    continue;
+                }
+
+                return Ok((status, text));
+            }
+            Err(e) => {
+                if is_retryable_error(&e) && attempt < policy.max_retries {
+                    last_err = Some(e.into());
+                    let d = jitter_add(policy, request_id, attempt, backoff_for_attempt(policy, attempt));
+                    tokio::time::sleep(d).await;
+                    continue;
+                }
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "HTTP request failed after retries: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

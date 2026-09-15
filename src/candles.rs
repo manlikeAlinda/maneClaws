@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::http_policy::{send_with_retry, HttpPolicy};
+use crate::http_policy::{send_text_with_retry, HttpPolicy};
 use crate::persist;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -18,7 +18,7 @@ pub struct Candle {
     pub volume: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum Interval {
     OneMinute,
     FiveMinutes,
@@ -51,7 +51,7 @@ fn cache_is_fresh(path: &Path, max_age: Duration) -> Result<bool> {
     Ok(age <= max_age)
 }
 
-fn parse_klines_body(body: &serde_json::Value) -> Result<Vec<Candle>> {
+pub(crate) fn parse_klines_body(body: &serde_json::Value) -> Result<Vec<Candle>> {
     // Binance kline format: array of arrays.
     // [
     //   [
@@ -167,12 +167,14 @@ pub async fn fetch_klines_from_base(
     );
 
     let policy = HttpPolicy::from_env();
-    let resp = send_with_retry(client, &policy, || client.get(&url)).await?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let (status, text) = send_text_with_retry(client, &policy, &url, || client.get(&url)).await?;
 
     if !status.is_success() {
         return Err(anyhow!("Klines returned {status}: {text}"));
+    }
+
+    if text.trim().is_empty() {
+        return Err(anyhow!("Klines returned {status} with empty body"));
     }
 
     let body = serde_json::from_str::<serde_json::Value>(&text)?;

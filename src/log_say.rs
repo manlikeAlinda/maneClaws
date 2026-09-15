@@ -1,6 +1,11 @@
 use crate::execution::Mode;
 use crate::state::Position;
-use tracing::info;
+use tracing::{debug, info};
+use std::io::Write;
+
+// Emit a light-weight JSON line for external analyzers to consume. This complements the
+// human-friendly `info!` lines above. We write both a debug-prefixed line and append a
+// `decision.jsonl` record so tools can reliably parse structured events from the log directory.
 
 pub fn say_start(mode: Mode, run_id: &str) {
     info!("Start: mode={:?} run_id={}", mode, run_id);
@@ -20,7 +25,7 @@ pub fn say_price(price: f64) {
 
 pub fn say_wallet(usdt_free: f64, btc_free: f64, equity_usdt: f64) {
     info!(
-        "Wallet: USDT_free={:.2} BTC_free={:.8} Equity≈{:.2} USDT",
+        "Wallet: USDT balance={:.2}, BTC={:.8}, Total Equity={:.2} USDT",
         usdt_free, btc_free, equity_usdt
     );
 }
@@ -50,7 +55,20 @@ pub fn say_decision_with_reason(mode: Mode, decision: &str, reason: &str) {
     if reason.trim().is_empty() {
         info!("Decision ({:?}): {}", mode, decision.trim());
     } else {
-        info!("Decision ({:?}): {} — {}", mode, decision.trim(), reason.trim());
+        info!("Decision ({:?}): {} -> {}", mode, decision.trim(), reason.trim());
+    }
+
+    // Structured JSON for analyzers
+    let obj = serde_json::json!({
+        "event": "decision",
+        "mode": format!("{:?}", mode),
+        "decision": decision.trim(),
+        "reason": reason.trim()
+    });
+    let line = obj.to_string();
+    debug!("DECISION_JSON {}", line);
+    if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open("decision.jsonl") {
+        let _ = writeln!(fh, "{}", line);
     }
 }
 
