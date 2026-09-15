@@ -258,12 +258,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    let snap = binance_survival_bot::dashboard::new_shared_snapshot();
-    tokio::spawn(binance_survival_bot::dashboard::serve(snap.clone()));
-
     let args: Vec<String> = std::env::args().collect();
     let loop_mode = args.iter().any(|a| a == "--loop")
         || matches!(std::env::var("BOT_LOOP").ok().as_deref(), Some("1"));
+
+    let snap = binance_survival_bot::dashboard::new_shared_snapshot();
+    let control = binance_survival_bot::dashboard::control::ControlState::new(loop_mode);
+    tokio::spawn(binance_survival_bot::dashboard::serve(
+        snap.clone(),
+        control.clone(),
+    ));
 
     if !loop_mode {
         binance_survival_bot::app::run_once(&client, &cfg, &snap).await?;
@@ -291,6 +295,11 @@ async fn main() -> Result<()> {
             info!("Loop finished.");
             return Ok(());
         }
+        if control.paused.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+            continue;
+        }
+
         i = i.saturating_add(1);
         info!("Heartbeat: run #{}", i);
         match binance_survival_bot::app::run_once(&client, &cfg, &snap).await {

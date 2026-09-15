@@ -12,6 +12,7 @@ bot_state.json.prev
 
 # Generated backtest reports
 backtest_*.html
+/backtest_reports/
 
 # Runtime logs/locks (do not commit)
 *.log

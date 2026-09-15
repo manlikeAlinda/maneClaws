@@ -1,3 +1,6 @@
+pub mod backtest_ui;
+pub mod control;
+
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -8,13 +11,22 @@ use axum::{
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
+use tower_http::services::ServeDir;
 
-// ── shared state type ─────────────────────────────────────────────────────────
+use control::ControlState;
+
+// ── shared state types ────────────────────────────────────────────────────────
 
 pub type SharedSnapshot = Arc<RwLock<Option<DashboardSnapshot>>>;
 
 pub fn new_shared_snapshot() -> SharedSnapshot {
     Arc::new(RwLock::new(None))
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub snap: SharedSnapshot,
+    pub control: Arc<ControlState>,
 }
 
 // ── snapshot struct ───────────────────────────────────────────────────────────
@@ -100,8 +112,8 @@ async fn get_index() -> impl IntoResponse {
         .unwrap()
 }
 
-async fn get_api_state(State(snap): State<SharedSnapshot>) -> impl IntoResponse {
-    match snap.read() {
+async fn get_api_state(State(state): State<AppState>) -> impl IntoResponse {
+    match state.snap.read() {
         Ok(guard) => match guard.as_ref() {
             Some(s) => (StatusCode::OK, Json(s.clone())).into_response(),
             None => (
@@ -120,16 +132,20 @@ async fn get_api_state(State(snap): State<SharedSnapshot>) -> impl IntoResponse 
 
 // ── server entry point ────────────────────────────────────────────────────────
 
-/// Spawn as `tokio::spawn(dashboard::serve(snap.clone()))`.
+/// Spawn as `tokio::spawn(dashboard::serve(snap.clone(), control.clone()))`.
 /// Binds to DASHBOARD_ADDR env var, default 127.0.0.1:3030.
-pub async fn serve(snap: SharedSnapshot) {
-    let addr = std::env::var("DASHBOARD_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:3030".to_string());
+pub async fn serve(snap: SharedSnapshot, control: Arc<ControlState>) {
+    let addr = std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "127.0.0.1:3030".to_string());
+
+    let state = AppState { snap, control };
 
     let app = Router::new()
         .route("/", get(get_index))
         .route("/api/state", get(get_api_state))
-        .with_state(snap);
+        .merge(control::routes())
+        .merge(backtest_ui::routes())
+        .nest_service("/reports", ServeDir::new(backtest_ui::REPORTS_DIR))
+        .with_state(state);
 
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => {
@@ -203,6 +219,11 @@ body::after{
   color:var(--cyan);text-shadow:var(--glow-c);
   display:flex;align-items:center;gap:.45rem;flex-shrink:0;
 }
+a.navlink{
+  font-size:.62rem;color:var(--muted);text-decoration:none;
+  border:1px solid var(--border2);border-radius:3px;padding:.2rem .55rem;flex-shrink:0;
+}
+a.navlink:hover{color:var(--text)}
 #hdr-price{
   font-size:1.75rem;font-weight:700;
   font-variant-numeric:tabular-nums;letter-spacing:-.02em;
@@ -216,6 +237,15 @@ body::after{
   color:var(--muted);align-items:center;margin-left:auto;
 }
 #hdr-meta .v{color:var(--text)}
+
+/* ── LOOP CONTROL ── */
+#loop-ctrl{display:none;align-items:center;gap:.4rem}
+#loop-btn{
+  font-family:inherit;font-size:.6rem;padding:.16rem .5rem;border-radius:3px;
+  border:1px solid var(--border2);background:rgba(255,255,255,.03);color:var(--text);
+  cursor:pointer;text-transform:uppercase;letter-spacing:.05em;
+}
+#loop-btn:hover{background:rgba(255,255,255,.07)}
 
 /* ── PULSE ── */
 .pulse-wrap{display:inline-flex;align-items:center;gap:.38rem;font-size:.65rem;font-weight:700;letter-spacing:.1em}
@@ -243,6 +273,11 @@ body::after{
 .bflat{background:rgba(255,255,255,.04);color:var(--muted);border:1px solid var(--border)}
 .bext{background:rgba(180,122,255,.1);color:var(--purple);border:1px solid rgba(180,122,255,.28)}
 .bdead{background:rgba(255,61,90,.14);color:var(--red);border:1px solid rgba(255,61,90,.32)}
+.blivewarn{
+  background:rgba(255,61,90,.16);color:var(--red);border:1px solid rgba(255,61,90,.35);
+  animation:livepulse 1.4s ease-in-out infinite;
+}
+@keyframes livepulse{0%,100%{opacity:1}50%{opacity:.55}}
 
 /* ── LAYOUT ── */
 #content{flex:1;display:flex;overflow:hidden;min-height:0}
@@ -390,6 +425,7 @@ body::after{
 <!-- HEADER -->
 <div id="hdr">
   <div class="brand"><span>⚡</span><span>BTC Survival Bot</span></div>
+  <a class="navlink" href="/backtest">⇄ Backtests</a>
   <div id="hdr-price">$—</div>
   <div id="hdr-mode"></div>
   <div class="pulse-wrap"><div class="pdot warn" id="pdot"></div><span id="ptext">Connecting</span></div>
@@ -400,6 +436,7 @@ body::after{
     <span>Drawdown <span class="v" id="h-dd">—</span></span>
     <span>Ticks <span class="v" id="h-tk">0</span></span>
     <span>Updated <span class="v" id="h-ts">—</span></span>
+    <span id="loop-ctrl">Loop <span class="v" id="loop-status">—</span><button id="loop-btn">Pause</button></span>
   </div>
 </div>
 
@@ -524,7 +561,7 @@ body::after{
 <script>
 const $=id=>document.getElementById(id);
 const usd=v=>v==null?'—':'$'+v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-const btc=v=>v==null?'—':v.toFixed(6)+' \u20BF';
+const btc=v=>v==null?'—':v.toFixed(6)+' ₿';
 const pct=v=>v==null?'—':(v*100).toFixed(2)+'%';
 const ts=ms=>ms?new Date(ms).toLocaleTimeString('en-US',{hour12:false}):'—';
 const clr=v=>v>0?'up':v<0?'dn':'neu';
@@ -637,7 +674,8 @@ function render(d){
 
   // Header
   flashPrice(d.price_usdt);
-  $('hdr-mode').innerHTML=bdg(d.mode,d.mode==='Live'?'bl':'bp');
+  const isLive=d.mode==='Live';
+  $('hdr-mode').innerHTML=bdg(isLive?'⚠ LIVE':d.mode,isLive?'blivewarn':'bp');
   $('h-eq').textContent=usd(d.equity_usdt);
   const spEl=$('h-spnl');
   spEl.textContent=(d.session_pnl_usdt>=0?'+':'')+usd(d.session_pnl_usdt);
@@ -714,16 +752,16 @@ function render(d){
   // Regime
   $('regime-bdg').innerHTML=bdg(d.regime,regCls(d.regime));
   $('regime-rsn').textContent=d.regime_reason;
-  $('htf-b').innerHTML=d.htf_bullish?'<span class="up">\u25b2 Yes</span>':'<span class="dn">\u25bc No</span>';
+  $('htf-b').innerHTML=d.htf_bullish?'<span class="up">▲ Yes</span>':'<span class="dn">▼ No</span>';
   $('bear-b').innerHTML=d.bearish_bias?'<span class="dn">Yes</span>':'<span class="mut">No</span>';
   $('vsq').innerHTML=d.vol_squeeze?'<span class="warn">Yes</span>':'<span class="mut">No</span>';
 
   // Bot status
   const bs=$('bot-st');
-  if(d.is_dead)bs.innerHTML='<span class="dn">\u{1f6d1} Dead \u2014 no more trading</span>';
+  if(d.is_dead)bs.innerHTML='<span class="dn">\u{1f6d1} Dead — no more trading</span>';
   else if(d.in_hibernation)bs.innerHTML='<span class="warn">\u{1f319} Hibernating</span>';
-  else if(d.in_cooldown)bs.innerHTML='<span class="warn">\u23f3 Trade cooldown</span>';
-  else bs.innerHTML='<span class="up">\u2713 Ready to trade</span>';
+  else if(d.in_cooldown)bs.innerHTML='<span class="warn">⏳ Trade cooldown</span>';
+  else bs.innerHTML='<span class="up">✓ Ready to trade</span>';
 
   // Decision
   const da=$('dec-act');
@@ -774,8 +812,33 @@ async function poll(){
     if(r.ok){const d=await r.json();if(!d.error)render(d);}
   }catch{}
 }
+
+// ── LOOP CONTROL ───────────────────────────────────────────────────────
+let loopPaused=false;
+async function pollControl(){
+  try{
+    const r=await fetch('/api/control/status',{cache:'no-store'});
+    if(!r.ok)return;
+    const d=await r.json();
+    loopPaused=d.paused;
+    const ctrl=$('loop-ctrl'),st=$('loop-status'),btn=$('loop-btn');
+    if(!d.loop_mode){ctrl.style.display='none';return}
+    ctrl.style.display='inline-flex';
+    st.textContent=loopPaused?'Paused':'Running';
+    st.className='v '+(loopPaused?'warn':'up');
+    btn.textContent=loopPaused?'Resume':'Pause';
+  }catch{}
+}
+$('loop-btn').addEventListener('click', async ()=>{
+  const action=loopPaused?'resume':'pause';
+  try{await fetch('/api/control/'+action,{method:'POST'})}catch{}
+  pollControl();
+});
+
 poll();
+pollControl();
 setInterval(poll,2000);
+setInterval(pollControl,2000);
 window.addEventListener('resize',drawSpark);
 </script>
 </body>
