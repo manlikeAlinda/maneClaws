@@ -106,6 +106,19 @@ pub struct BotState {
     pub last_auth_error_ms: u64,
     #[serde(default)]
     pub auth_error_cooldown_ms: u64,
+
+    // Set immediately after a real buy order is placed, before the follow-up
+    // fill-detail lookup - so if that lookup fails, the next tick can resolve
+    // the real order instead of the bot losing track of a live position it
+    // never got to record via enter_long(). Cleared once the entry completes.
+    #[serde(default)]
+    pub pending_entry_order_id: Option<u64>,
+    // The stop price that was already decided for the pending entry above -
+    // persisted alongside it so the next tick can complete enter_long() with
+    // the correct protective stop rather than recomputing one against
+    // possibly-changed market conditions a tick later.
+    #[serde(default)]
+    pub pending_entry_stop_price: Option<f64>,
 }
 
 impl Default for BotState {
@@ -133,6 +146,8 @@ impl Default for BotState {
             session_pnl_usdt: 0.0,
             last_auth_error_ms: 0,
             auth_error_cooldown_ms: 0,
+            pending_entry_order_id: None,
+            pending_entry_stop_price: None,
         }
     }
 }
@@ -162,6 +177,8 @@ impl BotState {
             session_pnl_usdt: 0.0,
             last_auth_error_ms: 0,
             auth_error_cooldown_ms: 0,
+            pending_entry_order_id: None,
+            pending_entry_stop_price: None,
         }
     }
 
@@ -384,6 +401,36 @@ impl BotState {
     }
 }
 
+/// Called when bot_state.json exists but is unrecoverable (unreadable, or
+/// invalid JSON with no usable .prev backup). Silently returning a fresh
+/// BotState here would wipe live risk-governance memory (position,
+/// stop_price, peak_equity, daily-loss anchors, cooldown/hibernation) with no
+/// trace - refuse to trade instead, loudly, unless the operator has
+/// explicitly opted into accepting a fresh state via BOT_ACCEPT_FRESH_STATE=1
+/// (mirrors the existing BOT_REVIVE_DEAD manual-override pattern).
+fn unrecoverable_state(starting_usdt: f64, reason: &str, detail: &str) -> Result<BotState> {
+    let accept_fresh = matches!(
+        std::env::var("BOT_ACCEPT_FRESH_STATE").ok().as_deref(),
+        Some("1")
+    );
+    if accept_fresh {
+        tracing::error!(
+            "bot_state.json is unrecoverable ({reason}: {detail}). \
+             BOT_ACCEPT_FRESH_STATE=1 is set, so proceeding with a fresh state anyway."
+        );
+        return Ok(BotState::new(starting_usdt));
+    }
+    tracing::error!(
+        "bot_state.json is unrecoverable ({reason}: {detail}) and no usable .prev backup exists. \
+         Refusing to trade - a fresh state would silently forget any open position, stop price, \
+         and risk-governance memory. Restore bot_state.json from a backup, inspect quarantine/, \
+         or set BOT_ACCEPT_FRESH_STATE=1 to explicitly accept starting over."
+    );
+    Err(anyhow::anyhow!(
+        "bot_state.json unrecoverable ({reason}: {detail}); refusing to trade"
+    ))
+}
+
 pub fn load_or_init(path: &str, starting_usdt: f64) -> Result<BotState> {
     let path = Path::new(path);
     let prev_path = persist::prev_path_for(path);
@@ -398,9 +445,20 @@ pub fn load_or_init(path: &str, starting_usdt: f64) -> Result<BotState> {
     if path.exists() {
         let s = match fs::read_to_string(path) {
             Ok(s) => s,
-            Err(_) => {
+            Err(io_err) => {
                 let _ = persist::quarantine_corrupt_file(path, "unreadable");
-                return Ok(BotState::new(starting_usdt));
+
+                // Best-effort recovery from previous snapshot before giving up.
+                if prev_path.exists() {
+                    if let Ok(prev_s) = fs::read_to_string(&prev_path) {
+                        if let Ok(prev_st) = serde_json::from_str::<BotState>(&prev_s) {
+                            let _ = save(path.to_string_lossy().as_ref(), &prev_st);
+                            return Ok(prev_st);
+                        }
+                    }
+                }
+
+                return unrecoverable_state(starting_usdt, "unreadable", &io_err.to_string());
             }
         };
 
@@ -419,8 +477,7 @@ pub fn load_or_init(path: &str, starting_usdt: f64) -> Result<BotState> {
                     }
                 }
 
-                let _ = e;
-                return Ok(BotState::new(starting_usdt));
+                return unrecoverable_state(starting_usdt, "invalid_json", &e.to_string());
             }
         };
         if st.starting_usdt <= 0.0 {
@@ -453,6 +510,68 @@ pub fn save(path: &str, state: &BotState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_state_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "binance_survival_bot_state_test_{label}_{}.json",
+            now_ms()
+        ))
+    }
+
+    #[test]
+    fn load_or_init_refuses_to_trade_on_corrupt_state_with_no_prev() {
+        let path = temp_state_path("corrupt_no_prev");
+        std::fs::write(&path, "{ this is not valid json").unwrap();
+        unsafe {
+            std::env::remove_var("BOT_ACCEPT_FRESH_STATE");
+        }
+
+        let result = load_or_init(path.to_str().unwrap(), 100.0);
+        assert!(
+            result.is_err(),
+            "corrupt state with no usable .prev must refuse to trade, not silently return a fresh state"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(persist::prev_path_for(&path));
+    }
+
+    #[test]
+    fn load_or_init_accepts_fresh_state_when_explicitly_overridden() {
+        let path = temp_state_path("corrupt_override");
+        std::fs::write(&path, "{ this is not valid json").unwrap();
+        unsafe {
+            std::env::set_var("BOT_ACCEPT_FRESH_STATE", "1");
+        }
+
+        let result = load_or_init(path.to_str().unwrap(), 100.0);
+
+        unsafe {
+            std::env::remove_var("BOT_ACCEPT_FRESH_STATE");
+        }
+
+        assert!(result.is_ok(), "explicit override must still allow a fresh state");
+        assert_eq!(result.unwrap().starting_usdt, 100.0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(persist::prev_path_for(&path));
+    }
+
+    #[test]
+    fn load_or_init_still_recovers_from_prev_when_available() {
+        let path = temp_state_path("corrupt_with_prev");
+        let good = BotState::new(250.0);
+        let good_json = serde_json::to_string(&good).unwrap();
+        std::fs::write(persist::prev_path_for(&path), &good_json).unwrap();
+        std::fs::write(&path, "{ not valid json at all").unwrap();
+
+        let result = load_or_init(path.to_str().unwrap(), 999.0);
+        assert!(result.is_ok(), "must recover from .prev before refusing to trade");
+        assert_eq!(result.unwrap().starting_usdt, 250.0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(persist::prev_path_for(&path));
+    }
 
     #[test]
     fn trailing_stop_moves_up_after_1r() {

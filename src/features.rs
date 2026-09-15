@@ -6,6 +6,12 @@ pub struct Features {
     pub ema20_1h: f64,
     pub ema50_1h: f64,
     /// 200-period EMA on 1h candles — higher-timeframe trend anchor.
+    /// NOTE: with the live pipeline's 200-candle 1h fetch (pipeline/mod.rs),
+    /// ema_last's smoothing loop never runs (values.len() == period), so this
+    /// is in practice a 200-candle simple average, not an exponentially
+    /// smoothed value. Fetching more than 200 1h candles would be a regime-
+    /// detection behavior change and needs re-simulation before landing, per
+    /// this project's standing rule for any strategy-affecting change.
     pub ema200_1h: f64,
     pub ema20_5m: f64,
     pub ema50_5m: f64,

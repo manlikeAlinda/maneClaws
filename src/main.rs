@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use std::env;
-use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
@@ -135,10 +134,13 @@ async fn main() -> Result<()> {
     let (key_before_present, _key_before_len) = env_present_len("BINANCE_API_KEY");
     let (sec_before_present, _sec_before_len) = env_present_len("BINANCE_API_SECRET");
 
-    let env_file_exists = Path::new(".env").exists();
-    let dotenv_result = dotenvy::dotenv();
-    let dotenv_loaded = dotenv_result.is_ok();
-    let dotenv_path = dotenv_result.ok();
+    // Pinned to the resolved base dir rather than dotenvy::dotenv()'s default
+    // upward directory search, so running from a different working directory
+    // can't silently pick up an unintended .env from an ancestor directory.
+    let dotenv_path = rp.base_dir.join(".env");
+    let env_file_exists = dotenv_path.exists();
+    let dotenv_loaded = dotenvy::from_path(&dotenv_path).is_ok();
+    let dotenv_path = if dotenv_loaded { Some(dotenv_path) } else { None };
 
     let (key_after_present, key_after_len) = env_present_len("BINANCE_API_KEY");
     let (sec_after_present, sec_after_len) = env_present_len("BINANCE_API_SECRET");
@@ -256,6 +258,35 @@ async fn main() -> Result<()> {
                 return Err(e);
             }
         }
+
+        // Refuse to go LIVE with a key that can withdraw funds: this bot only ever
+        // needs trading permission, and a withdrawal-capable key has a categorically
+        // larger blast radius than anything the trading logic's own risk limits can
+        // bound (audit finding 3.1).
+        match binance_survival_bot::account::fetch_api_restrictions(
+            &client,
+            &cfg.api_key,
+            &cfg.api_secret,
+            &cfg.base_url,
+        )
+        .await
+        {
+            Ok(restrictions) => {
+                if restrictions.enable_withdrawals {
+                    error!(
+                        "CRITICAL: this API key has withdrawal permission enabled. Refusing to \
+                         run LIVE. Create/scope a key with trading permission only (no withdrawals) \
+                         on Binance and use that instead."
+                    );
+                    return Err(anyhow!("API key has withdrawal permission enabled"));
+                }
+                info!("Pre-flight check passed. API key does not have withdrawal permission.");
+            }
+            Err(e) => {
+                error!("Could not verify API key permissions via apiRestrictions: {}", e);
+                return Err(e);
+            }
+        }
     }
 
     let args: Vec<String> = std::env::args().collect();
@@ -264,10 +295,16 @@ async fn main() -> Result<()> {
 
     let snap = binance_survival_bot::dashboard::new_shared_snapshot();
     let control = binance_survival_bot::dashboard::control::ControlState::new(loop_mode);
-    tokio::spawn(binance_survival_bot::dashboard::serve(
-        snap.clone(),
-        control.clone(),
-    ));
+    // The trading loop must keep running even if the dashboard task panics -
+    // but that panic was previously silent (JoinHandle discarded). Log it.
+    let (dash_snap, dash_control) = (snap.clone(), control.clone());
+    tokio::spawn(async move {
+        if let Err(e) =
+            tokio::spawn(binance_survival_bot::dashboard::serve(dash_snap, dash_control)).await
+        {
+            tracing::error!("Dashboard task panicked: {e}");
+        }
+    });
 
     if !loop_mode {
         binance_survival_bot::app::run_once(&client, &cfg, &snap).await?;

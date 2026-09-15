@@ -45,6 +45,37 @@ struct JobIdResponse {
     job_id: String,
 }
 
+/// Binance symbols are always uppercase ASCII alphanumeric (e.g. "BTCUSDT").
+/// Rejecting anything else keeps a request-supplied symbol from being
+/// interpolated unescaped into an outbound Binance URL query string in
+/// history.rs/backtest.rs (audit finding: unvalidated external input into an
+/// outbound request URL).
+fn validate_symbol(symbol: &str) -> Result<(), String> {
+    if !symbol.is_empty() && symbol.chars().all(|c| c.is_ascii_alphanumeric()) {
+        Ok(())
+    } else {
+        Err(format!("'{symbol}' is not a valid symbol (expected ASCII letters/digits only)"))
+    }
+}
+
+/// Rejects absolute paths and `..` components, so a data_dir/out_dir value
+/// from a request can't read or write outside the working directory's
+/// subdirectories (audit finding: unsanitized path params in the dashboard's
+/// backtest/history-fetch endpoints).
+fn validate_relative_dir(dir: &str) -> Result<(), String> {
+    let path = std::path::Path::new(dir);
+    if path.is_absolute() {
+        return Err(format!("'{dir}' must be a relative path, not absolute"));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("'{dir}' must not contain '..' components"));
+    }
+    Ok(())
+}
+
 fn new_running_job(id: &str, kind: &str) -> JobStatus {
     JobStatus {
         id: id.to_string(),
@@ -60,7 +91,15 @@ fn new_running_job(id: &str, kind: &str) -> JobStatus {
 async fn post_run_backtest(
     State(state): State<AppState>,
     Json(req): Json<RunBacktestRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if !state.control.try_start_job() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "a backtest or history-fetch job is already running" })),
+        )
+            .into_response();
+    }
+
     let job_id = state.control.new_job_id("backtest");
     state.control.insert_job(new_running_job(&job_id, "backtest"));
 
@@ -86,16 +125,19 @@ async fn post_run_backtest(
                 job.finished_at_ms = Some(crate::state::now_ms());
             }),
         }
+        control.release_job_slot();
     });
 
-    Json(JobIdResponse { job_id })
+    Json(JobIdResponse { job_id }).into_response()
 }
 
 fn run_backtest_blocking(req: RunBacktestRequest) -> Result<Vec<String>, String> {
     use crate::{backtest, report};
 
     let symbol = req.symbol.unwrap_or_else(|| "BTCUSDT".to_string());
+    validate_symbol(&symbol)?;
     let data_dir = req.data_dir.unwrap_or_else(|| "backtest_data".to_string());
+    validate_relative_dir(&data_dir)?;
     let has_range = req.start_frac.is_some() || req.end_frac.is_some();
     let start_frac = req.start_frac.unwrap_or(0.0);
     let end_frac = req.end_frac.unwrap_or(1.0);
@@ -154,7 +196,15 @@ fn run_backtest_blocking(req: RunBacktestRequest) -> Result<Vec<String>, String>
 async fn post_fetch_history(
     State(state): State<AppState>,
     Json(req): Json<FetchHistoryRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if !state.control.try_start_job() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "a backtest or history-fetch job is already running" })),
+        )
+            .into_response();
+    }
+
     let job_id = state.control.new_job_id("fetch_history");
     state.control.insert_job(new_running_job(&job_id, "fetch_history"));
 
@@ -175,9 +225,10 @@ async fn post_fetch_history(
                 job.finished_at_ms = Some(crate::state::now_ms());
             }),
         }
+        control.release_job_slot();
     });
 
-    Json(JobIdResponse { job_id })
+    Json(JobIdResponse { job_id }).into_response()
 }
 
 async fn fetch_history_job(req: FetchHistoryRequest) -> Result<Vec<String>, String> {
@@ -185,8 +236,10 @@ async fn fetch_history_job(req: FetchHistoryRequest) -> Result<Vec<String>, Stri
     use crate::history;
 
     let symbol = req.symbol.unwrap_or_else(|| "BTCUSDT".to_string());
+    validate_symbol(&symbol)?;
     let days = req.days.unwrap_or(90).clamp(1, 720);
     let out_dir = req.out_dir.unwrap_or_else(|| "backtest_data".to_string());
+    validate_relative_dir(&out_dir)?;
 
     let end_ms = crate::state::now_ms() as i64;
     let start_ms = end_ms - days * 24 * 60 * 60 * 1000;
@@ -250,13 +303,18 @@ async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> impl 
     }
 }
 
-pub fn routes() -> Router<AppState> {
+pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/backtest", get(get_backtest_page))
-        .route("/api/backtest/run", post(post_run_backtest))
         .route("/api/backtest/reports", get(get_reports))
-        .route("/api/history/fetch", post(post_fetch_history))
         .route("/api/jobs/{id}", get(get_job))
+}
+
+/// Mutating routes - mounted with `control::require_token` layered on in `mod.rs`.
+pub fn protected_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/backtest/run", post(post_run_backtest))
+        .route("/api/history/fetch", post(post_fetch_history))
 }
 
 const BACKTEST_HTML: &str = r##"<!DOCTYPE html>
@@ -398,6 +456,14 @@ function pollJob(id){
   },1500);
 }
 
+let dashboardToken=null;
+async function loadToken(){
+  try{
+    const r=await fetch('/api/control/token',{cache:'no-store'});
+    if(r.ok){dashboardToken=(await r.json()).token;}
+  }catch{}
+}
+
 $('bt-run-btn').addEventListener('click', async ()=>{
   const body={
     symbol: $('bt-symbol').value.trim()||undefined,
@@ -410,8 +476,9 @@ $('bt-run-btn').addEventListener('click', async ()=>{
   $('bt-run-btn').disabled=true;
   setJobUI('Starting backtest…');
   try{
-    const r=await fetch('/api/backtest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch('/api/backtest/run',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':dashboardToken||''},body:JSON.stringify(body)});
     const j=await r.json();
+    if(!r.ok){setJobUI('Failed to start: '+(j.error||r.status),'err');$('bt-run-btn').disabled=false;return}
     pollJob(j.job_id);
   }catch(e){setJobUI('Failed to start: '+e,'err');$('bt-run-btn').disabled=false}
 });
@@ -425,12 +492,14 @@ $('fh-run-btn').addEventListener('click', async ()=>{
   $('fh-run-btn').disabled=true;
   setJobUI('Starting history fetch…');
   try{
-    const r=await fetch('/api/history/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch('/api/history/fetch',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':dashboardToken||''},body:JSON.stringify(body)});
     const j=await r.json();
+    if(!r.ok){setJobUI('Failed to start: '+(j.error||r.status),'err');$('fh-run-btn').disabled=false;return}
     pollJob(j.job_id);
   }catch(e){setJobUI('Failed to start: '+e,'err');$('fh-run-btn').disabled=false}
 });
 
+loadToken();
 loadReports();
 </script>
 </body>

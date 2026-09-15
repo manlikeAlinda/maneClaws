@@ -525,7 +525,12 @@ pub fn entry_long_signal(
             }
 
             // Candidate C: dynamic momentum for micro-breakouts inside range.
-            // Only when HTF is at least neutral (htf_bullish or flat).
+            // NOTE: this is dispatched unconditionally, not gated on HTF state -
+            // only the coarser file-level bearish_bias veto above applies here.
+            // A "mixed" HTF (not fully bearish-stacked but not bullish either)
+            // only loses the htf_bullish bonus below, it isn't blocked. Adding
+            // a real HTF gate would change which signals fire and needs
+            // re-simulation before landing, per this project's standing rule.
             let mo = dynamic_momentum_signal(f, current_price);
             if mo.action == Action::EnterLong {
                 let score = mo.confidence * context_multiplier_for_momentum(f, htf_bullish);

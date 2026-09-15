@@ -3,7 +3,7 @@ $taskName = "Binance Survival Bot - 30min Bursts"
 
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if (-not $task) {
-    Write-Host "Task '$taskName' not found — already removed or never existed."
+    Write-Host "Task '$taskName' not found - already removed or never existed."
     exit 0
 }
 
@@ -14,8 +14,8 @@ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 
 $check = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($check) {
-    Write-Host "FAILED — task still exists. State: $($check.State)"
+    Write-Host "FAILED - task still exists. State: $($check.State)"
     exit 1
 } else {
-    Write-Host "CONFIRMED — task '$taskName' deleted, no next run scheduled."
+    Write-Host "CONFIRMED - task '$taskName' deleted, no next run scheduled."
 }

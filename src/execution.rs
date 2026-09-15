@@ -67,7 +67,7 @@ pub async fn execute_buy_market(
             Ok(None)
         }
         Mode::Live => {
-            let ack = binance_orders::place_order(client, api_key, api_secret, base, &qs).await?;
+            let ack = binance_orders::place_order(client, api_key, api_secret, base, symbol, &qs).await?;
             Ok(Some(ack.order_id))
         }
     }
@@ -102,7 +102,7 @@ pub async fn execute_sell_market(
             Ok(None)
         }
         Mode::Live => {
-            let ack = binance_orders::place_order(client, api_key, api_secret, base, &qs).await?;
+            let ack = binance_orders::place_order(client, api_key, api_secret, base, symbol, &qs).await?;
             Ok(Some(ack.order_id))
         }
     }
@@ -149,7 +149,7 @@ pub async fn place_stop_loss_limit_sell(
             Ok(None)
         }
         Mode::Live => {
-            let ack = binance_orders::place_order(client, api_key, api_secret, base, &qs).await?;
+            let ack = binance_orders::place_order(client, api_key, api_secret, base, symbol, &qs).await?;
             Ok(Some(ack.order_id))
         }
     }

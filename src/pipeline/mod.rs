@@ -10,7 +10,7 @@ use reqwest::Client;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct CoreOutcome {
@@ -311,7 +311,7 @@ pub async fn detect_public_ip(client: &Client) -> Option<String> {
 }
 
 fn log_actions_for_2015() {
-    info!(
+    warn!(
         "Actions:\n- Confirm key+secret are from the same API key entry\n- Enable Read + Spot & Margin Trading\n- Check IP whitelist"
     );
 }
@@ -322,9 +322,9 @@ fn log_ip_whitelist_hint(_public_ip: &Option<String>) {
         std::env::var("BOT_PUBLIC_IP_LOOKUP").ok().as_deref(),
         Some("1")
     ) {
-        info!("If your Binance API key uses IP restriction, whitelist this IP.");
+        warn!("If your Binance API key uses IP restriction, whitelist this IP.");
     } else {
-        info!("Public IP lookup is disabled (set BOT_PUBLIC_IP_LOOKUP=1). If your Binance API key uses IP restriction, whitelist this machine's public IP.");
+        warn!("Public IP lookup is disabled (set BOT_PUBLIC_IP_LOOKUP=1). If your Binance API key uses IP restriction, whitelist this machine's public IP.");
     }
 }
 
@@ -492,7 +492,7 @@ pub async fn run_once_core(
     let symbol = cfg.symbol.as_str();
 
     let now_ms = crate::state::now_ms();
-    let st_load = state::load_or_init(&cfg.state_path, 0.0).unwrap_or_default();
+    let st_load = state::load_or_init(&cfg.state_path, 0.0)?;
     let in_auth_cooldown = st_load.in_auth_cooldown(now_ms);
 
     if in_auth_cooldown {
@@ -532,7 +532,7 @@ pub async fn run_once_core(
                 }
 
                 // Soft Circuit Breaker: Update state with cooldown instead of a hard flag file.
-                let mut st_err = state::load_or_init(&cfg.state_path, 0.0).unwrap_or_default();
+                let mut st_err = state::load_or_init(&cfg.state_path, 0.0)?;
                 st_err.last_auth_error_ms = now_ms;
                 st_err.auth_error_cooldown_ms = 60 * 60 * 1000; // 60 minutes
                 let _ = state::save(&cfg.state_path, &st_err);
@@ -542,6 +542,12 @@ pub async fn run_once_core(
                     let ts = time::OffsetDateTime::now_utc();
                     let _ = writeln!(f, "{} - CRITICAL: Binance API auth rejected: {}", ts, e);
                 }
+
+                crate::alert::notify(
+                    "BTC Survival Bot: auth cooldown engaged",
+                    &format!("Binance rejected the API key/request: {e}\nPrivate API calls are paused for 60 minutes."),
+                )
+                .await;
 
                 return Ok(CoreOutcome {
                     did_place_order: false,
@@ -628,6 +634,93 @@ pub async fn run_once_core(
     let mut st = state::load_or_init(&cfg.state_path, equity_usdt)?;
     st.sync_equity_and_day(equity_usdt);
 
+    // Resolve a pending entry left over from a previous tick where the buy
+    // order placed successfully but the follow-up fill-detail lookup failed
+    // before enter_long() ever ran (audit finding 1.1). Must run before any
+    // other gate, since a real, unprotected position may already be open.
+    if let (Some(pending_oid), Some(pending_stop)) =
+        (st.pending_entry_order_id, st.pending_entry_stop_price)
+    {
+        match binance_orders::get_order(
+            client,
+            &cfg.api_key,
+            &cfg.api_secret,
+            &cfg.base_url,
+            symbol,
+            pending_oid,
+        )
+        .await
+        {
+            Ok(order_status) => match order_status.status.as_str() {
+                "FILLED" => {
+                    let entry_price =
+                        avg_price_from_order_status(&order_status)?.unwrap_or(md.price);
+                    let exec_qty = parse_f64_field("executedQty", &order_status.executed_qty)?;
+                    let entry_qty = if exec_qty > 0.0 { exec_qty } else { 0.0 };
+                    let tp = entry_price + 3.0 * (entry_price - pending_stop);
+
+                    info!(
+                        "Resolved pending entry order_id={} as FILLED: entry_price={} qty={}. \
+                         Completing the entry that a previous tick couldn't finish.",
+                        pending_oid,
+                        fmt_usdt(entry_price),
+                        fmt_btc(entry_qty)
+                    );
+                    st.enter_long(entry_price, entry_qty, pending_stop, Some(tp), md.now_ms);
+                    st.pending_entry_order_id = None;
+                    st.pending_entry_stop_price = None;
+                    persist_state(&cfg.state_path, &st)?;
+                    // Deliberately fall through: the position-management branch
+                    // below (Position::Long) will discover there is no exchange
+                    // stop order yet and place one, same as any other tick
+                    // managing an open Long with no stop_order_id.
+                }
+                "NEW" | "PARTIALLY_FILLED" => {
+                    info!(
+                        "Pending entry order_id={} still open (status={}). Waiting for it to fill.",
+                        pending_oid, order_status.status
+                    );
+                    return Ok(CoreOutcome {
+                        did_place_order: false,
+                        mode,
+                        regime: r.regime,
+                        decision: "WAIT".to_string(),
+                        reason: "Finishing a pending order from last tick.".to_string(),
+                        end: "no money moved".to_string(),
+                    });
+                }
+                other => {
+                    info!(
+                        "Pending entry order_id={} resolved as {} - no position was opened.",
+                        pending_oid, other
+                    );
+                    st.pending_entry_order_id = None;
+                    st.pending_entry_stop_price = None;
+                    persist_state(&cfg.state_path, &st)?;
+                }
+            },
+            Err(e) => {
+                warn!("Could not resolve pending entry order_id={}: {}. Retrying next tick.", pending_oid, e);
+                crate::alert::notify(
+                    "BTC Survival Bot: cannot resolve pending order",
+                    &format!(
+                        "order_id={pending_oid} on {symbol}: {e}\nA buy may have gone through with no \
+                         local record of it. Retrying every tick until resolved."
+                    ),
+                )
+                .await;
+                return Ok(CoreOutcome {
+                    did_place_order: false,
+                    mode,
+                    regime: r.regime,
+                    decision: "WAIT".to_string(),
+                    reason: "Could not confirm a pending order from last tick. Retrying.".to_string(),
+                    end: "no money moved".to_string(),
+                });
+            }
+        }
+    }
+
     // Optional recovery latch: if `is_dead` was set previously but equity is no longer below the
     // -20% threshold, allow a manual revive via env. This is intentionally explicit.
     if st.is_dead
@@ -651,6 +744,16 @@ pub async fn run_once_core(
     );
 
     let (died_now, unlocked_now) = st.eval_death_and_unlock(st.equity_usdt, md.now_ms);
+    if died_now {
+        crate::alert::notify(
+            "BTC Survival Bot: DEAD",
+            &format!(
+                "Equity fell to {:.2} USDT (anchor {:.2}). The bot has stopped trading.",
+                st.equity_usdt, st.start_equity_usdt
+            ),
+        )
+        .await;
+    }
     if died_now || st.is_dead {
         persist_state(&cfg.state_path, &st)?;
         return Ok(CoreOutcome {
@@ -1090,7 +1193,7 @@ pub async fn run_once_core(
     match st.position.clone() {
         state::Position::Flat => {
             if md.stale_any {
-                info!("We skip trading because candle data looks stale.");
+                warn!("We skip trading because candle data looks stale.");
                 log_decision_summary(
                     run_id,
                     mode,
@@ -1293,13 +1396,24 @@ pub async fn run_once_core(
                             Ok(oid) => oid,
                             Err(e) => {
                                 if is_binance_code(&e, -2015) {
-                                    info!("Reason: Binance rejected a signed order request (code -2015).");
+                                    warn!("Reason: Binance rejected a signed order request (code -2015).");
                                     log_actions_for_2015();
                                     log_ip_whitelist_hint(&public_ip);
                                 }
                                 return Err(e);
                             }
                         };
+
+                        // Persist that a real order was placed *before* the fill-detail
+                        // lookup below, which can itself fail. Without this, a failure in
+                        // that lookup would return Err with no local record that a real,
+                        // unprotected position now exists on the exchange (audit finding
+                        // 1.1). Cleared once enter_long() below records the position.
+                        if let Some(oid) = order_id {
+                            st.pending_entry_order_id = Some(oid);
+                            st.pending_entry_stop_price = Some(stop);
+                            persist_state(&cfg.state_path, &st)?;
+                        }
 
                         did_place_order = true;
                         decision_action = "ENTER_LONG".to_string();
@@ -1333,7 +1447,7 @@ pub async fn run_once_core(
                                 .await
                                 .inspect_err(|e| {
                                     if is_binance_code(e, -2015) {
-                                        info!("Reason: Binance rejected a signed order request (code -2015).");
+                                        warn!("Reason: Binance rejected a signed order request (code -2015).");
                                         log_actions_for_2015();
                                         log_ip_whitelist_hint(&public_ip);
                                     }
@@ -1358,7 +1472,7 @@ pub async fn run_once_core(
                                 .await
                                 .unwrap_or_else(|e| {
                                     if is_binance_code(&e, -2015) {
-                                        info!("Reason: Binance rejected a signed order request (code -2015).");
+                                        warn!("Reason: Binance rejected a signed order request (code -2015).");
                                         log_actions_for_2015();
                                         log_ip_whitelist_hint(&public_ip);
                                     }
@@ -1379,6 +1493,8 @@ pub async fn run_once_core(
                         let tp = md.price + 3.0 * (md.price - stop);
                         st.enter_long(entry_price, entry_qty, stop, Some(tp), md.now_ms);
                         st.bump_trades_today();
+                        st.pending_entry_order_id = None;
+                        st.pending_entry_stop_price = None;
 
                         // Telemetry: record the entry event.
                         {
@@ -1405,7 +1521,7 @@ pub async fn run_once_core(
                         if mode == Mode::Live {
                             // Set limit a bit below stop to help it fill when triggered.
                             let limit_price = (stop * 0.998).max(0.01);
-                            match execution::place_stop_loss_limit_sell(
+                            let stop_res = execution::place_stop_loss_limit_sell(
                                 client,
                                 mode,
                                 &cfg.api_key,
@@ -1418,94 +1534,102 @@ pub async fn run_once_core(
                                 limit_price,
                                 price_precision,
                             )
-                            .await
-                            {
+                            .await;
+                            match &stop_res {
                                 Ok(Some(stop_order_id)) => {
-                                    st.set_stop_order(stop_order_id, stop);
+                                    st.set_stop_order(*stop_order_id, stop);
                                     info!("We placed a real safety stop on the exchange.");
                                 }
-                                Ok(None) => {
-                                    info!("Exchange protection returned no order id; panic flattening.");
+                                Ok(None) | Err(_) => {
+                                    if let Err(e) = &stop_res {
+                                        if is_binance_code(e, -2015) {
+                                            warn!("Reason: Binance rejected a signed order request (code -2015).");
+                                            log_actions_for_2015();
+                                            log_ip_whitelist_hint(&public_ip);
+                                        }
+                                    }
+                                    warn!("Exchange protection failed to place; panic flattening.");
 
                                     // Best-effort panic flatten: sell what we believe we bought.
                                     let sell_qty = sizing::round_down_to_step(entry_qty, md.step_size);
-                                    if sell_qty > 0.0 {
-                                        let sell_res = execution::execute_sell_market(
-                                            client,
-                                            mode,
-                                            &cfg.api_key,
-                                            &cfg.api_secret,
-                                            &cfg.base_url,
-                                            symbol,
-                                            sell_qty,
-                                            qty_precision,
+                                    let sell_res = if sell_qty > 0.0 {
+                                        Some(
+                                            execution::execute_sell_market(
+                                                client,
+                                                mode,
+                                                &cfg.api_key,
+                                                &cfg.api_secret,
+                                                &cfg.base_url,
+                                                symbol,
+                                                sell_qty,
+                                                qty_precision,
+                                            )
+                                            .await,
                                         )
-                                        .await;
-                                        if let Err(se) = sell_res {
-                                            if is_binance_code(&se, -2015) {
-                                                info!("Reason: Binance rejected a signed order request (code -2015).");
-                                                log_actions_for_2015();
-                                                log_ip_whitelist_hint(&public_ip);
-                                            }
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(Err(se)) = &sell_res {
+                                        if is_binance_code(se, -2015) {
+                                            warn!("Reason: Binance rejected a signed order request (code -2015).");
+                                            log_actions_for_2015();
+                                            log_ip_whitelist_hint(&public_ip);
                                         }
                                     }
-                                    st.exit_to_flat_with_cooldown(md.now_ms);
-                                    persist_state(&cfg.state_path, &st)?;
-                                    log_decision_summary(
-                                        run_id,
-                                        mode,
-                                        r.regime,
-                                        position_label(&st.position),
-                                        "PANIC_FLATTEN",
-                                        "failed_to_place_exchange_stop",
-                                        Some((st.trades_today, max_trades_per_day)),
-                                        Some(risk::drawdown_fraction(st.peak_equity_usdt, st.equity_usdt)),
-                                        Some(daily_loss_fraction(st.daily_loss_start_equity_usdt, st.equity_usdt)),
-                                        Some(risk::drawdown_fraction(st.peak_equity_usdt, st.equity_usdt) >= 0.10),
-                                    );
-                                    return Ok(CoreOutcome {
-                                        did_place_order: true,
-                                        mode,
-                                        regime: r.regime,
-                                        decision: "SELL".to_string(),
-                                        reason: "I failed to place protection. I sold to stay safe."
-                                            .to_string(),
-                                        end: "real order sent".to_string(),
-                                    });
-                                }
-                                Err(e) => {
-                                    info!("Exchange protection failed; panic flattening.");
 
-                                    if is_binance_code(&e, -2015) {
-                                        info!("Reason: Binance rejected a signed order request (code -2015).");
-                                        log_actions_for_2015();
-                                        log_ip_whitelist_hint(&public_ip);
-                                    }
-
-                                    // Best-effort panic flatten: sell what we believe we bought.
-                                    let sell_qty = sizing::round_down_to_step(entry_qty, md.step_size);
-                                    if sell_qty > 0.0 {
-                                        let sell_res = execution::execute_sell_market(
-                                            client,
-                                            mode,
-                                            &cfg.api_key,
-                                            &cfg.api_secret,
-                                            &cfg.base_url,
-                                            symbol,
-                                            sell_qty,
-                                            qty_precision,
+                                    if matches!(sell_res, Some(Err(_))) {
+                                        // Could not protect the position AND could not flatten it.
+                                        // Leave st.position untouched: it must keep reflecting reality
+                                        // (a real, unprotected Long still open on the exchange), so the
+                                        // normal HOLD_LONG stop-discovery/retry logic on the next tick
+                                        // keeps trying to place a stop rather than the bot forgetting
+                                        // this position ever existed.
+                                        persist_state(&cfg.state_path, &st)?;
+                                        crate::alert::notify(
+                                            "BTC Survival Bot: CRITICAL - unprotected open position",
+                                            &format!(
+                                                "Entry succeeded but both the safety-stop placement and the \
+                                                 panic-flatten sell failed for {symbol} qty={entry_qty}. A real \
+                                                 position is open on the exchange with no stop-loss. Manual \
+                                                 intervention needed now."
+                                            ),
                                         )
                                         .await;
-                                        if let Err(se) = sell_res {
-                                            if is_binance_code(&se, -2015) {
-                                                info!("Reason: Binance rejected a signed order request (code -2015).");
-                                                log_actions_for_2015();
-                                                log_ip_whitelist_hint(&public_ip);
-                                            }
-                                        }
+                                        log_decision_summary(
+                                            run_id,
+                                            mode,
+                                            r.regime,
+                                            position_label(&st.position),
+                                            "PANIC_FLATTEN_FAILED",
+                                            "failed_to_place_stop_and_failed_to_flatten",
+                                            Some((st.trades_today, max_trades_per_day)),
+                                            Some(risk::drawdown_fraction(st.peak_equity_usdt, st.equity_usdt)),
+                                            Some(daily_loss_fraction(st.daily_loss_start_equity_usdt, st.equity_usdt)),
+                                            Some(risk::drawdown_fraction(st.peak_equity_usdt, st.equity_usdt) >= 0.10),
+                                        );
+                                        return Ok(CoreOutcome {
+                                            did_place_order: true,
+                                            mode,
+                                            regime: r.regime,
+                                            decision: "WAIT".to_string(),
+                                            reason: "I could not place protection and could not sell. \
+                                                      A real position is open and unprotected. I need help."
+                                                .to_string(),
+                                            end: "position open, unprotected".to_string(),
+                                        });
                                     }
+
                                     st.exit_to_flat_with_cooldown(md.now_ms);
                                     persist_state(&cfg.state_path, &st)?;
+                                    crate::alert::notify(
+                                        "BTC Survival Bot: panic-flattened a position",
+                                        &format!(
+                                            "Could not place a safety stop for {symbol} qty={entry_qty}, so the \
+                                             bot sold immediately to avoid holding it unprotected."
+                                        ),
+                                    )
+                                    .await;
                                     log_decision_summary(
                                         run_id,
                                         mode,
@@ -1737,7 +1861,7 @@ pub async fn run_once_core(
                             Ok(oid) => oid,
                             Err(e) => {
                                 if is_binance_code(&e, -2015) {
-                                    info!("Reason: Binance rejected a signed order request (code -2015).");
+                                    warn!("Reason: Binance rejected a signed order request (code -2015).");
                                     log_actions_for_2015();
                                     log_ip_whitelist_hint(&public_ip);
                                 }

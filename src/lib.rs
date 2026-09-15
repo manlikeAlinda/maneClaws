@@ -19,6 +19,7 @@ pub mod persist;
 pub mod paths;
 
 pub(crate) mod money;
+pub mod alert;
 pub mod app;
 pub mod backtest;
 pub mod dashboard;

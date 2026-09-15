@@ -10,7 +10,7 @@ use tracing::debug;
 
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     pub base_url: String,
     pub symbol: String,
@@ -19,6 +19,23 @@ pub struct AppConfig {
     pub candle_cache_max_age: Duration,
     pub api_key: String,
     pub api_secret: String,
+}
+
+// Manual Debug impl that redacts api_key/api_secret: the derived impl would
+// print both in full, and there is no guard rail stopping a future
+// `debug!("{:?}", cfg)` from leaking them to logs (audit finding).
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("base_url", &self.base_url)
+            .field("symbol", &self.symbol)
+            .field("state_path", &self.state_path)
+            .field("data_dir", &self.data_dir)
+            .field("candle_cache_max_age", &self.candle_cache_max_age)
+            .field("api_key", &"<redacted>")
+            .field("api_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,4 +150,25 @@ pub async fn run_once(
         mode: out.mode,
         regime: out.regime,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_format_never_contains_the_secret() {
+        let cfg = AppConfig {
+            base_url: "https://api.binance.com".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            state_path: "bot_state.json".to_string(),
+            data_dir: "data".to_string(),
+            candle_cache_max_age: Duration::from_secs(60),
+            api_key: "THIS_IS_THE_SECRET_KEY".to_string(),
+            api_secret: "THIS_IS_THE_SECRET_VALUE".to_string(),
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("THIS_IS_THE_SECRET_KEY"), "api_key leaked into Debug output: {dbg}");
+        assert!(!dbg.contains("THIS_IS_THE_SECRET_VALUE"), "api_secret leaked into Debug output: {dbg}");
+    }
 }

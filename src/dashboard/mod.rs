@@ -139,11 +139,20 @@ pub async fn serve(snap: SharedSnapshot, control: Arc<ControlState>) {
 
     let state = AppState { snap, control };
 
+    let protected = Router::new()
+        .merge(control::protected_routes())
+        .merge(backtest_ui::protected_routes())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            control::require_token,
+        ));
+
     let app = Router::new()
         .route("/", get(get_index))
         .route("/api/state", get(get_api_state))
-        .merge(control::routes())
-        .merge(backtest_ui::routes())
+        .merge(control::public_routes())
+        .merge(backtest_ui::public_routes())
+        .merge(protected)
         .nest_service("/reports", ServeDir::new(backtest_ui::REPORTS_DIR))
         .with_state(state);
 
@@ -815,6 +824,13 @@ async function poll(){
 
 // ── LOOP CONTROL ───────────────────────────────────────────────────────
 let loopPaused=false;
+let dashboardToken=null;
+async function loadToken(){
+  try{
+    const r=await fetch('/api/control/token',{cache:'no-store'});
+    if(r.ok){dashboardToken=(await r.json()).token;}
+  }catch{}
+}
 async function pollControl(){
   try{
     const r=await fetch('/api/control/status',{cache:'no-store'});
@@ -831,10 +847,11 @@ async function pollControl(){
 }
 $('loop-btn').addEventListener('click', async ()=>{
   const action=loopPaused?'resume':'pause';
-  try{await fetch('/api/control/'+action,{method:'POST'})}catch{}
+  try{await fetch('/api/control/'+action,{method:'POST',headers:{'X-Dashboard-Token':dashboardToken||''}})}catch{}
   pollControl();
 });
 
+loadToken();
 poll();
 pollControl();
 setInterval(poll,2000);

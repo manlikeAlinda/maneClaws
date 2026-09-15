@@ -237,3 +237,47 @@ pub async fn fetch_spot_balances(
         btc_locked,
     })
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ApiRestrictions {
+    #[serde(rename = "enableWithdrawals", default)]
+    pub enable_withdrawals: bool,
+    #[serde(rename = "enableSpotAndMarginTrading", default)]
+    pub enable_spot_and_margin_trading: bool,
+}
+
+/// Confirms the configured API key's actual scope via Binance's own
+/// apiRestrictions endpoint, rather than trusting that the key was set up
+/// correctly. A key with withdrawal permission enabled has a categorically
+/// larger blast radius than one scoped to trading only (audit finding 3.1).
+pub async fn fetch_api_restrictions(
+    client: &Client,
+    api_key: &str,
+    api_secret: &str,
+    base: &str,
+) -> Result<ApiRestrictions> {
+    let _ = binance_auth::ensure_time_synced(client, base).await;
+
+    let ts = binance_auth::now_ms_with_offset();
+    let recv_window = 5000_u64;
+    let query = format!("recvWindow={recv_window}&timestamp={ts}");
+    let sig = binance_auth::sign_hmac_sha256_hex(api_secret, &query);
+    let url = format!("{base}/sapi/v1/account/apiRestrictions?{query}&signature={sig}");
+
+    let policy = HttpPolicy::from_env();
+    let resp = send_with_retry(client, &policy, || client.get(&url).header("X-MBX-APIKEY", api_key)).await?;
+
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        let parsed = serde_json::from_str::<BinanceErrorPayload>(&text).ok();
+        return Err(anyhow!(BinanceApiError {
+            status: status.as_u16(),
+            code: parsed.as_ref().map(|p| p.code),
+            msg: parsed.as_ref().map(|p| p.msg.clone()),
+            body_trunc: text.chars().take(500).collect(),
+        }));
+    }
+
+    Ok(serde_json::from_str::<ApiRestrictions>(&text)?)
+}
